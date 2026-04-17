@@ -36,6 +36,7 @@ After installation, the `lc` command will be available in your terminal.
 | `lc list` | `lc l` | List problems with optional filters | `lc l --diff easy --limit 10` |
 | `lc tags` | `lc tg` | List available problem tags | `lc tg` |
 | `lc pick` | `lc p` | View specific problem details and description | `lc p two-sum` |
+| `lc random` | `lc r` | View a randomly selected problem | `lc r -d hard` |
 | `lc edit` | `lc e` | Generate starter code and open in editor | `lc e 1` |
 | `lc test` | `lc t` | Run example test cases on local file | `lc t 1` |
 | `lc exec` | `lc x` | Submit a local file's solution to LeetCode | `lc x 1.two-sum.py` |
@@ -48,11 +49,13 @@ lc auth
 ```
 
 ### Browse Problems
-List recent problems or filter by difficulty/tags:
+List recent problems or filter by difficulty/tags/sorting:
 ```bash
 lc list
 lc list --diff easy --limit 10
 lc list --tag array --search "sum"
+lc list --high ac
+lc list --low freq --limit 20
 # Alias: lc l
 ```
 
@@ -67,6 +70,13 @@ Given a problem ID or a slug (e.g., `two-sum` or `1`), view the description:
 ```bash
 lc pick 1
 # Alias: lc p 1
+```
+
+You can also fetch and view a random problem, optionally filtered by tag or difficulty:
+```bash
+lc random
+lc random --diff hard --tag array
+# Alias: lc r
 ```
 
 ### Edit Solution

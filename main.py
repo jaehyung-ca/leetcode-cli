@@ -46,6 +46,8 @@ def list(
     diff: str = typer.Option(None, "-d", "--diff", help="Filter by difficulty"),
     search: str = typer.Option(None, "-s", "--search", help="Search query"),
     limit: int = typer.Option(50, "-m", "--limit", help="Max results"),
+    high: str = typer.Option(None, "--high", help="Sort descending by: ac or freq"),
+    low: str = typer.Option(None, "--low", help="Sort ascending by: ac or freq"),
 ):
     """List problems with optional filters."""
     filters = {}
@@ -57,6 +59,23 @@ def list(
         filters["difficulty"] = d_map.get(diff.lower(), "EASY")
     if search:
         filters["searchKeywords"] = search
+    
+    if high:
+        s = high.lower()
+        if s in ["ac", "ac_rate", "acceptance"]:
+            filters["orderBy"] = "AC_RATE"
+            filters["sortOrder"] = "DESCENDING"
+        elif s in ["freq", "frequency"]:
+            filters["orderBy"] = "FREQUENCY"
+            filters["sortOrder"] = "DESCENDING"
+    elif low:
+        s = low.lower()
+        if s in ["ac", "ac_rate", "acceptance"]:
+            filters["orderBy"] = "AC_RATE"
+            filters["sortOrder"] = "ASCENDING"
+        elif s in ["freq", "frequency"]:
+            filters["orderBy"] = "FREQUENCY"
+            filters["sortOrder"] = "ASCENDING"
 
     data = api.get_questions_list(limit=limit, filters=filters)
     questions = data.get("questions", [])
@@ -83,6 +102,39 @@ def list(
             ac_rate,
         )
     console.print(table)
+
+
+@app.command()
+@app.command("r", hidden=True)
+def random(
+    tag: str = typer.Option(None, "-t", "--tag", help="Filter by tag"),
+    diff: str = typer.Option(None, "-d", "--diff", help="Filter by difficulty"),
+):
+    """Pick a random problem, optionally filtered."""
+    import random as rand
+    filters = {}
+    if tag:
+        filters["tags"] = [tag]
+    if diff:
+        d_map = {"easy": "EASY", "medium": "MEDIUM", "hard": "HARD"}
+        filters["difficulty"] = d_map.get(diff.lower(), "EASY")
+
+    data = api.get_questions_list(limit=1, filters=filters)
+    total = data.get("total", 0)
+    
+    if total == 0:
+        console.print("[red]No problems found matching criteria.[/red]")
+        return
+        
+    skip = rand.randint(0, total - 1)
+    data = api.get_questions_list(limit=1, skip=skip, filters=filters)
+    q = data.get("questions", [])
+    if not q:
+        console.print("[red]Failed to fetch random problem.[/red]")
+        return
+        
+    slug = q[0].get("titleSlug")
+    pick(slug)
 
 
 def resolve_slug(slug_or_id: str) -> str:
@@ -276,9 +328,23 @@ def exec_cmd(file_path: str):
 
             console.print(f"\n[bold]Result: {check.get('status_msg')}[/bold]")
             if check.get("status_msg") == "Accepted":
-                console.print(
-                    f"Runtime: {check.get('status_runtime')} | Memory: {check.get('status_memory')}"
-                )
+                rt_perc = check.get("runtime_percentile")
+                mem_perc = check.get("memory_percentile")
+                rt_str = check.get("status_runtime", "N/A")
+                mem_str = check.get("status_memory", "N/A")
+
+                if rt_perc is not None:
+                    try:
+                        rt_str += f" (Beats {float(rt_perc):.2f}%)"
+                    except ValueError:
+                        pass
+                if mem_perc is not None:
+                    try:
+                        mem_str += f" (Beats {float(mem_perc):.2f}%)"
+                    except ValueError:
+                        pass
+
+                console.print(f"Runtime: {rt_str} | Memory: {mem_str}")
             else:
                 if "compile_error" in check:
                     console.print(f"[red]{check.get('compile_error')}[/red]")
@@ -359,12 +425,15 @@ def test(file_path: str):
             else:
                 expected = check.get("expected_code_answer", [])
                 actual = check.get("code_answer", [])
+                stdout = check.get("std_output_list", check.get("code_output", []))
 
                 # LeetCode's backend API returns a trailing empty string due to newline splitting artifacts
                 if expected and expected[-1] == "":
                     expected.pop()
                 if actual and actual[-1] == "":
                     actual.pop()
+                if stdout and stdout[-1] == "":
+                    stdout.pop()
 
                 raw_tc_lines = test_cases.strip("\n").split("\n")
                 num_cases = max(len(expected), len(actual))
@@ -381,9 +450,14 @@ def test(file_path: str):
 
                     exp = expected[i] if i < len(expected) else "N/A"
                     act = actual[i] if i < len(actual) else "N/A"
+                    out = stdout[i] if i < len(stdout) else ""
                     match_col = "green" if str(exp) == str(act) else "red"
                     console.print(f"  Expected: {exp}")
                     console.print(f"  Output:   [{match_col}]{act}[/{match_col}]")
+                    if out:
+                        console.print("  Stdout:")
+                        for line in out.replace('\r', '').strip('\n').split('\n'):
+                            console.print(f"    {line}")
             break
 
     except Exception as e:
