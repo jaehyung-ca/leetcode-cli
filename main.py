@@ -265,8 +265,12 @@ def edit(slug: str):
         header = f'"""{q["questionFrontendId"]}. {q["title"]} (Difficulty: {q["difficulty"]})\n'
         header += '"""\n'
         header += "from typing import List\n\n\n"
+        
+        testcases = q.get("exampleTestcases", "")
+        testcase_str = f'\n\n"""\n[TESTCASES]\n{testcases}\n"""\n'
+        
         with open(file_name, "w") as f:
-            f.write(header + python_snippet["code"])
+            f.write(header + python_snippet["code"] + testcase_str)
         console.print(f"[green]Created {file_name}![/green]")
     else:
         console.print(f"Opening existing {file_name}...")
@@ -350,9 +354,16 @@ def exec_cmd(file_path: str):
                     console.print(f"[red]{check.get('compile_error')}[/red]")
                 if "runtime_error" in check:
                     console.print(f"[red]{check.get('runtime_error')}[/red]")
+                if "last_testcase" in check and check.get("last_testcase"):
+                    inputs = check.get("last_testcase").replace("\n", ", ")
+                    console.print(f"Input:    {inputs}")
                 if "expected_output" in check:
                     console.print(f"Expected: {check.get('expected_output')}")
-                    console.print(f"Output: {check.get('code_output')}")
+                    console.print(f"Output:   {check.get('code_output')}")
+                if "std_output" in check and check.get("std_output"):
+                    console.print("Stdout:")
+                    for line in check.get("std_output").replace('\r', '').strip('\n').split('\n'):
+                        console.print(f"  {line}")
             break
 
     except Exception as e:
@@ -387,15 +398,20 @@ def test(file_path: str):
         return
 
     question_id = q["questionId"]
-    test_cases = q.get("exampleTestcases", "")
+
+    with open(file_path, "r") as f:
+        code = f.read()
+
+    match_tc = re.search(r"\[TESTCASES\]\n(.*?)\n(?:\"\"\"|''')", code, re.DOTALL)
+    if match_tc:
+        test_cases = match_tc.group(1).strip()
+    else:
+        test_cases = q.get("exampleTestcases", "")
 
     if not test_cases:
         console.print(
             "[yellow]No example testcases found, testing with empty input.[/yellow]"
         )
-
-    with open(file_path, "r") as f:
-        code = f.read()
 
     console.print("[cyan]Running tests...[/cyan]")
     try:
