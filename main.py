@@ -263,14 +263,14 @@ def edit(slug: str):
 
     if should_write:
         header = f'"""{q["questionFrontendId"]}. {q["title"]} (Difficulty: {q["difficulty"]})\n'
+        
+        testcases = q.get("exampleTestcases", "")
+        header += f"\n[TESTCASES]\n{testcases}\n"
         header += '"""\n'
         header += "from typing import List\n\n\n"
         
-        testcases = q.get("exampleTestcases", "")
-        testcase_str = f'\n\n"""\n[TESTCASES]\n{testcases}\n"""\n'
-        
         with open(file_name, "w") as f:
-            f.write(header + python_snippet["code"] + testcase_str)
+            f.write(header + python_snippet["code"] + "\n")
         console.print(f"[green]Created {file_name}![/green]")
     else:
         console.print(f"Opening existing {file_name}...")
