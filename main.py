@@ -1,12 +1,15 @@
 import os
 import time
 import subprocess
+import shutil
+import hashlib
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.markdown import Markdown
 from markdownify import markdownify as md
 from pathlib import Path
+from urllib.parse import urlparse
 
 from auth import extract_cookies
 import api
@@ -14,6 +17,130 @@ import config
 
 app = typer.Typer(help="CLI tool for LeetCode")
 console = Console()
+
+
+def is_wezterm_session() -> bool:
+    return (
+        os.environ.get("TERM_PROGRAM") == "WezTerm"
+        or bool(os.environ.get("WEZTERM_PANE"))
+        or bool(os.environ.get("WEZTERM_EXECUTABLE"))
+    )
+
+
+def build_wezterm_imgcat_command(image_path: str) -> list[str]:
+    command = ["wezterm", "imgcat", "--width", "auto"]
+    if os.environ.get("TMUX"):
+        command.extend(["--tmux-passthru", "detect"])
+    command.append(image_path)
+    return command
+
+
+def render_image_with_wezterm(image_path: str) -> bool:
+    """Render an image inline when running inside WezTerm."""
+    if not shutil.which("wezterm"):
+        return False
+
+    if not is_wezterm_session():
+        return False
+
+    try:
+        result = subprocess.run(
+            build_wezterm_imgcat_command(image_path),
+            stdout=console.file,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def download_image_to_tempfile(url: str) -> tuple[str | None, dict]:
+    import requests
+    import tempfile
+
+    diagnostics = {
+        "url": url,
+        "status_code": None,
+        "content_type": None,
+        "content_length_header": None,
+        "downloaded_bytes": 0,
+        "final_url": None,
+        "sha256": None,
+        "temp_path": None,
+    }
+
+    resp = requests.get(url, timeout=10)
+    diagnostics["status_code"] = resp.status_code
+    diagnostics["content_type"] = resp.headers.get("content-type")
+    diagnostics["content_length_header"] = resp.headers.get("content-length")
+    diagnostics["final_url"] = resp.url
+
+    if resp.status_code != 200:
+        return None, diagnostics
+
+    suffix = Path(urlparse(resp.url).path).suffix or ".img"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
+        tf.write(resp.content)
+        tf.flush()
+        diagnostics["downloaded_bytes"] = len(resp.content)
+        diagnostics["sha256"] = hashlib.sha256(resp.content).hexdigest()
+        diagnostics["temp_path"] = tf.name
+        return tf.name, diagnostics
+
+
+def debug_render_image(url: str):
+    console.print(f"[bold]Image debug[/bold] {url}")
+    console.print(f"TERM_PROGRAM={os.environ.get('TERM_PROGRAM')}")
+    console.print(f"TERM={os.environ.get('TERM')}")
+    console.print(f"WEZTERM_PANE={os.environ.get('WEZTERM_PANE')}")
+    console.print(f"WEZTERM_EXECUTABLE={os.environ.get('WEZTERM_EXECUTABLE')}")
+    console.print(f"TMUX={os.environ.get('TMUX')}")
+    console.print(f"which wezterm={shutil.which('wezterm')}")
+    console.print(f"is_wezterm_session={is_wezterm_session()}")
+
+    image_path = None
+    try:
+        image_path, diagnostics = download_image_to_tempfile(url)
+        for key in [
+            "status_code",
+            "content_type",
+            "content_length_header",
+            "downloaded_bytes",
+            "final_url",
+            "sha256",
+            "temp_path",
+        ]:
+            console.print(f"{key}={diagnostics[key]}")
+
+        if not image_path:
+            console.print("[red]Download failed before rendering.[/red]")
+            return
+
+        command = build_wezterm_imgcat_command(image_path)
+        console.print(f"wezterm_imgcat_command={' '.join(command)}")
+        result = subprocess.run(
+            command,
+            stdout=console.file,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        console.print(f"wezterm_imgcat_returncode={result.returncode}")
+        console.print(
+            f"wezterm_imgcat_stderr={result.stderr.strip() or '<empty>'}"
+        )
+    except subprocess.TimeoutExpired as exc:
+        console.print(
+            f"[red]wezterm_imgcat_timeout={exc.timeout}s after command start[/red]"
+        )
+    except Exception as exc:
+        console.print(f"[red]debug_exception={type(exc).__name__}: {exc}[/red]")
+    finally:
+        if image_path and os.path.exists(image_path):
+            os.unlink(image_path)
 
 
 @app.command()
@@ -184,10 +311,8 @@ def pick(slug: str):
 
     console.print(
         f"[bold]{q['questionFrontendId']}. {q['title']}[/bold] (Difficulty: {q['difficulty']})\n"
+        f"https://leetcode.com/problems/{slug}/\n"
     )
-    import sys
-    import base64
-    import requests
     import re
     from bs4 import BeautifulSoup
 
@@ -213,17 +338,30 @@ def pick(slug: str):
             url = images[i]
             if url:
                 try:
-                    resp = requests.get(url, timeout=5)
-                    if resp.status_code == 200:
-                        b64 = base64.b64encode(resp.content).decode("ascii")
-                        sys.stdout.write(
-                            f"\033]1337;File=inline=1;preserveAspectRatio=1:{b64}\a\n"
-                        )
-                        sys.stdout.flush()
-                    else:
+                    image_path, _ = download_image_to_tempfile(url)
+                    if not image_path:
                         console.print(f"[dim]Image: {url}[/dim]")
+                        continue
+
+                    try:
+                        if not render_image_with_wezterm(image_path):
+                            console.print(f"[dim]Image: {url}[/dim]")
+                    except Exception:
+                        console.print(f"[dim]Image: {url}[/dim]")
+                    finally:
+                        os.unlink(image_path)
                 except Exception:
                     console.print(f"[dim]Image: {url}[/dim]")
+
+
+@app.command("debug-image")
+def debug_image(
+    url: str = typer.Argument(
+        "https://assets.leetcode.com/uploads/2025/11/17/tree2.png"
+    ),
+):
+    """Verbose debugging for inline image rendering."""
+    debug_render_image(url)
 
 
 @app.command()
@@ -263,6 +401,7 @@ def edit(slug: str):
 
     if should_write:
         header = f'"""{q["questionFrontendId"]}. {q["title"]} (Difficulty: {q["difficulty"]})\n'
+        header += f'https://leetcode.com/problems/{slug}/\n'
         
         testcases = q.get("exampleTestcases", "")
         header += f"\n[TESTCASES]\n{testcases}\n"
