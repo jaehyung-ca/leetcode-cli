@@ -10,6 +10,7 @@ from rich.markdown import Markdown
 from markdownify import markdownify as md
 from pathlib import Path
 from urllib.parse import urlparse
+import json
 
 from auth import extract_cookies
 import api
@@ -30,7 +31,7 @@ def is_wezterm_session() -> bool:
 def build_wezterm_imgcat_command(image_path: str) -> list[str]:
     command = ["wezterm", "imgcat", "--width", "auto"]
     if os.environ.get("TMUX"):
-        command.extend(["--tmux-passthru", "detect"])
+        command.extend(["--tmux-passthru", "enable"])
     command.append(image_path)
     return command
 
@@ -54,6 +55,53 @@ def render_image_with_wezterm(image_path: str) -> bool:
         return result.returncode == 0
     except subprocess.TimeoutExpired:
         return False
+
+
+def render_image_with_chafa(image_path: str) -> bool:
+    """Render an image using chafa (text-based, survives tmux copy-mode)."""
+    if not shutil.which("chafa"):
+        return False
+    try:
+        subprocess.run(
+            ["chafa", "--format", "symbols", image_path],
+            stdout=console.file,
+            check=False,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def render_image_with_catimg(image_path: str) -> bool:
+    """Render an image using catimg."""
+    if not shutil.which("catimg"):
+        return False
+    try:
+        subprocess.run(
+            ["catimg", image_path],
+            stdout=console.file,
+            check=False,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def render_image(image_path: str) -> bool:
+    """Try various methods to render an image in the terminal."""
+    # 1. WezTerm (Highest quality, but doesn't survive tmux copy-mode)
+    if render_image_with_wezterm(image_path):
+        return True
+
+    # 2. Chafa (Text-based symbols, survives tmux copy-mode)
+    if render_image_with_chafa(image_path):
+        return True
+
+    # 3. Catimg (Fallback text-based)
+    if render_image_with_catimg(image_path):
+        return True
+
+    return False
 
 
 def download_image_to_tempfile(url: str) -> tuple[str | None, dict]:
@@ -98,6 +146,8 @@ def debug_render_image(url: str):
     console.print(f"WEZTERM_EXECUTABLE={os.environ.get('WEZTERM_EXECUTABLE')}")
     console.print(f"TMUX={os.environ.get('TMUX')}")
     console.print(f"which wezterm={shutil.which('wezterm')}")
+    console.print(f"which chafa={shutil.which('chafa')}")
+    console.print(f"which catimg={shutil.which('catimg')}")
     console.print(f"is_wezterm_session={is_wezterm_session()}")
 
     image_path = None
@@ -118,19 +168,23 @@ def debug_render_image(url: str):
             console.print("[red]Download failed before rendering.[/red]")
             return
 
+        console.print("[bold]Testing render_image()...[/bold]")
+        success = render_image(image_path)
+        console.print(f"render_image_success={success}")
+
         command = build_wezterm_imgcat_command(image_path)
         console.print(f"wezterm_imgcat_command={' '.join(command)}")
         result = subprocess.run(
             command,
             stdout=console.file,
             stderr=subprocess.PIPE,
-            text=True,
+            text=False,
             check=False,
             timeout=10,
         )
         console.print(f"wezterm_imgcat_returncode={result.returncode}")
         console.print(
-            f"wezterm_imgcat_stderr={result.stderr.strip() or '<empty>'}"
+            f"wezterm_imgcat_stderr={result.stderr.decode(errors='replace').strip() or '<empty>'}"
         )
     except subprocess.TimeoutExpired as exc:
         console.print(
@@ -166,9 +220,9 @@ def tags():
     console.print(table)
 
 
-@app.command()
+@app.command("list")
 @app.command("l", hidden=True)
-def list(
+def list_problems(
     tag: str = typer.Option(None, "-t", "--tag", help="Filter by tag"),
     diff: str = typer.Option(None, "-d", "--diff", help="Filter by difficulty"),
     search: str = typer.Option(None, "-s", "--search", help="Search query"),
@@ -186,7 +240,7 @@ def list(
         filters["difficulty"] = d_map.get(diff.lower(), "EASY")
     if search:
         filters["searchKeywords"] = search
-    
+
     if high:
         s = high.lower()
         if s in ["ac", "ac_rate", "acceptance"]:
@@ -231,14 +285,15 @@ def list(
     console.print(table)
 
 
-@app.command()
+@app.command("random")
 @app.command("r", hidden=True)
-def random(
+def random_problem(
     tag: str = typer.Option(None, "-t", "--tag", help="Filter by tag"),
     diff: str = typer.Option(None, "-d", "--diff", help="Filter by difficulty"),
 ):
     """Pick a random problem, optionally filtered."""
     import random as rand
+
     filters = {}
     if tag:
         filters["tags"] = [tag]
@@ -248,18 +303,18 @@ def random(
 
     data = api.get_questions_list(limit=1, filters=filters)
     total = data.get("total", 0)
-    
+
     if total == 0:
         console.print("[red]No problems found matching criteria.[/red]")
         return
-        
+
     skip = rand.randint(0, total - 1)
     data = api.get_questions_list(limit=1, skip=skip, filters=filters)
     q = data.get("questions", [])
     if not q:
         console.print("[red]Failed to fetch random problem.[/red]")
         return
-        
+
     slug = q[0].get("titleSlug")
     pick(slug)
 
@@ -275,6 +330,60 @@ def resolve_slug(slug_or_id: str) -> str:
             return q.get("titleSlug")
 
     return slug_or_id
+
+
+def compare_answers(exp, act, status_msg: str | None = None) -> bool:
+    """Compare expected and actual results logically, considering LeetCode's flexibility."""
+    if status_msg == "Accepted":
+        return True
+
+    if exp == act:
+        return True
+
+    def parse_if_json(s):
+        if not isinstance(s, str):
+            return s
+        s_clean = s.strip()
+        if not s_clean:
+            return s
+        if (s_clean.startswith("[") and s_clean.endswith("]")) or (
+            s_clean.startswith("{") and s_clean.endswith("}")
+        ):
+            try:
+                return json.loads(s_clean)
+            except:
+                return s
+        return s
+
+    exp_obj = parse_if_json(exp)
+    act_obj = parse_if_json(act)
+
+    if exp_obj == act_obj:
+        return True
+
+    # Deep sort for list comparison where order doesn't matter (e.g. 3Sum)
+    if isinstance(exp_obj, list) and isinstance(act_obj, list):
+
+        def deep_sort(obj):
+            if isinstance(obj, list):
+                # Recursively sort items
+                items = [deep_sort(x) for x in obj]
+                try:
+                    # Sort by string representation to handle mixed types or unhashable items
+                    return sorted(items, key=lambda x: str(x))
+                except:
+                    return items
+            return obj
+
+        if deep_sort(exp_obj) == deep_sort(act_obj):
+            return True
+
+    # Fallback: compare strings without whitespace
+    if isinstance(exp, str) and isinstance(act, str):
+        if exp.replace(" ", "") == act.replace(" ", ""):
+            return True
+
+    return False
 
 
 def get_target_file(arg: str) -> str:
@@ -344,7 +453,7 @@ def pick(slug: str):
                         continue
 
                     try:
-                        if not render_image_with_wezterm(image_path):
+                        if not render_image(image_path):
                             console.print(f"[dim]Image: {url}[/dim]")
                     except Exception:
                         console.print(f"[dim]Image: {url}[/dim]")
@@ -389,25 +498,20 @@ def edit(slug: str):
 
     should_write = True
     if os.path.exists(file_name):
-        import click
-
-        console.print(
-            f"File {file_name} already exists. Re-initialize and overwrite it? [y/N] ",
-            end="",
+        should_write = typer.confirm(
+            f"File {file_name} already exists. Re-initialize and overwrite it?",
+            default=False,
         )
-        char = click.getchar()
-        console.print(char)
-        should_write = char.lower() == "y"
 
     if should_write:
         header = f'"""{q["questionFrontendId"]}. {q["title"]} (Difficulty: {q["difficulty"]})\n'
-        header += f'https://leetcode.com/problems/{slug}/\n'
-        
+        header += f"https://leetcode.com/problems/{slug}/\n"
+
         testcases = q.get("exampleTestcases", "")
         header += f"\n[TESTCASES]\n{testcases}\n"
         header += '"""\n'
         header += "from typing import List\n\n\n"
-        
+
         with open(file_name, "w") as f:
             f.write(header + python_snippet["code"] + "\n")
         console.print(f"[green]Created {file_name}![/green]")
@@ -501,7 +605,12 @@ def exec_cmd(file_path: str):
                     console.print(f"Output:   {check.get('code_output')}")
                 if "std_output" in check and check.get("std_output"):
                     console.print("Stdout:")
-                    for line in check.get("std_output").replace('\r', '').strip('\n').split('\n'):
+                    for line in (
+                        check.get("std_output")
+                        .replace("\r", "")
+                        .strip("\n")
+                        .split("\n")
+                    ):
                         console.print(f"  {line}")
             break
 
@@ -554,7 +663,12 @@ def test(file_path: str):
 
     console.print("[cyan]Running tests...[/cyan]")
     try:
-        sub_resp = api.test_code(slug, question_id, "python3", code, test_cases)
+        try:
+            sub_resp = api.test_code(slug, question_id, "python3", code, test_cases)
+        except Exception as e:
+            console.print(f"[red]Error starting test: {e}[/red]")
+            return
+
         run_id = sub_resp.get("interpret_id")
         if not run_id:
             console.print(
@@ -566,16 +680,26 @@ def test(file_path: str):
 
         while True:
             time.sleep(2)
-            check = api.check_submission(run_id)
+            try:
+                check = api.check_test_run(run_id)
+            except Exception as e:
+                console.print(f"\n[red]Error polling result: {e}[/red]")
+                break
+
             state = check.get("state")
             if state == "PENDING" or state == "STARTED":
                 console.print(".", end="", style="dim", flush=True)
                 continue
 
             console.print(f"\n[bold]Test Result: {check.get('status_msg')}[/bold]")
-            if "compile_error" in check:
+
+            runtime = check.get("status_runtime")
+            if runtime:
+                console.print(f"Runtime: {runtime}")
+
+            if "compile_error" in check and check.get("compile_error"):
                 console.print(f"[red]{check.get('compile_error')}[/red]")
-            elif "runtime_error" in check:
+            elif "runtime_error" in check and check.get("runtime_error"):
                 console.print(f"[red]{check.get('runtime_error')}[/red]")
             else:
                 expected = check.get("expected_code_answer", [])
@@ -583,35 +707,58 @@ def test(file_path: str):
                 stdout = check.get("std_output_list", check.get("code_output", []))
 
                 # LeetCode's backend API returns a trailing empty string due to newline splitting artifacts
-                if expected and expected[-1] == "":
+                if isinstance(expected, list) and expected and expected[-1] == "":
                     expected.pop()
-                if actual and actual[-1] == "":
+                if isinstance(actual, list) and actual and actual[-1] == "":
                     actual.pop()
-                if stdout and stdout[-1] == "":
+                if isinstance(stdout, list) and stdout and stdout[-1] == "":
                     stdout.pop()
 
-                raw_tc_lines = test_cases.strip("\n").split("\n")
-                num_cases = max(len(expected), len(actual))
-                args_per_case = len(raw_tc_lines) // max(1, num_cases)
+                raw_tc_lines = [
+                    line for line in test_cases.strip("\n").split("\n") if line.strip()
+                ]
+                num_cases = max(
+                    len(expected) if isinstance(expected, list) else 0,
+                    len(actual) if isinstance(actual, list) else 0,
+                )
+
+                if num_cases > 0:
+                    args_per_case = len(raw_tc_lines) // num_cases
+                else:
+                    args_per_case = 1
 
                 for i in range(num_cases):
-                    console.print(f"Test Case {i + 1}:")
+                    console.print(f"\n[bold]Test Case {i + 1}:[/bold]")
 
-                    if i * args_per_case < len(raw_tc_lines):
+                    if args_per_case > 0 and i * args_per_case < len(raw_tc_lines):
                         inputs = raw_tc_lines[
                             i * args_per_case : (i + 1) * args_per_case
                         ]
-                        console.print(f"  Input:    {', '.join(inputs)}")
+                        console.print(
+                            f"  Input:    [magenta]{', '.join(inputs)}[/magenta]"
+                        )
 
-                    exp = expected[i] if i < len(expected) else "N/A"
-                    act = actual[i] if i < len(actual) else "N/A"
-                    out = stdout[i] if i < len(stdout) else ""
-                    match_col = "green" if str(exp) == str(act) else "red"
+                    exp = (
+                        expected[i]
+                        if isinstance(expected, list) and i < len(expected)
+                        else "N/A"
+                    )
+                    act = (
+                        actual[i]
+                        if isinstance(actual, list) and i < len(actual)
+                        else "N/A"
+                    )
+
+                    match = compare_answers(exp, act, check.get("status_msg"))
+                    match_col = "green" if match else "red"
+
                     console.print(f"  Expected: {exp}")
-                    console.print(f"  Output:   [{match_col}]{act}[/{match_col}]")
-                    if out:
+                    console.print("  Output:   ", end="")
+                    console.print(act, style=match_col)
+
+                    if isinstance(stdout, list) and i < len(stdout) and stdout[i]:
                         console.print("  Stdout:")
-                        for line in out.replace('\r', '').strip('\n').split('\n'):
+                        for line in stdout[i].replace("\r", "").strip("\n").split("\n"):
                             console.print(f"    {line}")
             break
 

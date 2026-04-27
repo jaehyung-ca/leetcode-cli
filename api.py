@@ -157,8 +157,17 @@ def submit_code(title_slug: str, question_id: str, lang: str, typed_code: str):
         raise Exception(f"HTTP {response.status_code}: {response.text[:500]}")
     return response.json()
 
-def check_submission(submission_id: int):
+def check_submission(submission_id):
     url = f"{BASE_URL}/submissions/detail/{submission_id}/check/"
+    headers = get_auth_headers()
+    cookies = get_auth_cookies()
+    
+    response = requests.get(url, headers=headers, cookies=cookies, impersonate="chrome")
+    response.raise_for_status()
+    return response.json()
+
+def check_test_run(interpret_id):
+    url = f"{BASE_URL}/submissions/detail/{interpret_id}/check/"
     headers = get_auth_headers()
     cookies = get_auth_cookies()
     
