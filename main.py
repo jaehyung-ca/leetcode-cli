@@ -64,8 +64,11 @@ def render_image_with_wezterm(image_path: str, width: str | None = None) -> str 
     if not shutil.which("wezterm"):
         return None
 
-    # Even if not in a wezterm session, we might be in tmux which is inside wezterm
-    if not is_wezterm_session() and not os.environ.get("TMUX"):
+    # Disable images in TMUX as they are unstable
+    if os.environ.get("TMUX"):
+        return None
+
+    if not is_wezterm_session():
         return None
 
     try:
@@ -81,13 +84,7 @@ def render_image_with_wezterm(image_path: str, width: str | None = None) -> str 
             timeout=10,
         )
         if result.returncode == 0:
-            output = result.stdout
-            if os.environ.get("TMUX"):
-                # Wrap in tmux DCS passthrough: ESC P tmux ; ESC [data] ESC \
-                # All ESC bytes inside [data] must be doubled.
-                output = b"\x1bPtmux;" + \
-                    output.replace(b"\x1b", b"\x1b\x1b") + b"\x1b\\"
-            return output.decode("utf-8", errors="ignore")
+            return result.stdout.decode("utf-8", errors="ignore")
     except Exception:
         pass
     return None
