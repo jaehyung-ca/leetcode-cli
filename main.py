@@ -67,13 +67,55 @@ def render_image_with_wezterm(image_path: str) -> str | None:
     return None
 
 
-def render_image_with_chafa(image_path: str) -> str | None:
-    """Render an image using chafa (text-based, survives tmux copy-mode)."""
+def get_image_rendering(image_path: str, prefer_text: bool = False) -> str | None:
+    """Try various methods to render an image with high quality and pager compatibility.
+    
+    We use imgcat for high-res rendering if possible, otherwise chafa.
+    """
+    # Use symbols mode to get a reliable height estimate and a high-quality fallback.
+    width = max(20, console.width - 4)
+    sym_res = render_image_with_chafa(image_path, fmt="symbols", size=f"{width}", symbols="all")
+    height = sym_res.count("\n") if sym_res else 0
+
+    if not prefer_text and is_wezterm_session():
+        try:
+            import io
+            from imgcat import imgcat
+            with open(image_path, "rb") as f:
+                data = f.read()
+            # Capture imgcat output into a buffer
+            buf = io.BytesIO()
+            imgcat(data, filename=os.path.basename(image_path), width=width, fp=buf)
+            res = buf.getvalue().decode("utf-8", errors="ignore")
+            if res:
+                # Pad with newlines AFTER the high-res sequence to push cursor down.
+                # Increased limit to allow for higher resolution in the pager.
+                if len(res) < 32000:
+                    return res + ("\n" * height)
+        except Exception:
+            pass
+
+    # Fallback to high-fidelity symbols mode (ANSI art) if imgcat fails or sequence too large.
+    return sym_res
+
+
+def render_image_with_chafa(
+    image_path: str, fmt: str = "symbols", size: str | None = None, symbols: str | None = None
+) -> str | None:
+    """Render an image using chafa with advanced quality options."""
     if not shutil.which("chafa"):
         return None
     try:
+        cmd = ["chafa", "--format", fmt, "--color-space", "din99d", "--work", "9"]
+        if size:
+            cmd.extend(["--size", size])
+        if symbols:
+            cmd.extend(["--symbols", symbols])
+        
+        cmd.append(image_path)
+        
         result = subprocess.run(
-            ["chafa", "--format", "symbols", image_path],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -83,39 +125,6 @@ def render_image_with_chafa(image_path: str) -> str | None:
     except Exception:
         pass
     return None
-
-
-def render_image_with_catimg(image_path: str) -> str | None:
-    """Render an image using catimg."""
-    if not shutil.which("catimg"):
-        return None
-    try:
-        result = subprocess.run(
-            ["catimg", image_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode == 0:
-            return result.stdout.decode("utf-8", errors="ignore")
-    except Exception:
-        pass
-    return None
-
-
-def get_image_rendering(image_path: str, prefer_text: bool = False) -> str | None:
-    """Try various methods to render an image and return the output."""
-    if prefer_text:
-        return (
-            render_image_with_chafa(image_path)
-            or render_image_with_catimg(image_path)
-            or render_image_with_wezterm(image_path)
-        )
-    return (
-        render_image_with_wezterm(image_path)
-        or render_image_with_chafa(image_path)
-        or render_image_with_catimg(image_path)
-    )
 
 
 def render_image(image_path: str) -> bool:
