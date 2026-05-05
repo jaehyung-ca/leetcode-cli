@@ -1,14 +1,13 @@
+import io
 import os
 import time
 import subprocess
 import shutil
 import hashlib
 import typer
-from rich.console import Console, Group
+from rich.console import Console
 from rich.table import Table
 from rich.markdown import Markdown
-from rich.live import Live
-from rich.text import Text
 import click
 from markdownify import markdownify as md
 from pathlib import Path
@@ -214,10 +213,12 @@ def debug_render_image(url: str):
         )
     except subprocess.TimeoutExpired as exc:
         console.print(
-            f"[red]wezterm_imgcat_timeout={exc.timeout}s after command start[/red]"
+            f"[red]wezterm_imgcat_timeout={
+                exc.timeout}s after command start[/red]"
         )
     except Exception as exc:
-        console.print(f"[red]debug_exception={type(exc).__name__}: {exc}[/red]")
+        console.print(f"[red]debug_exception={
+                      type(exc).__name__}: {exc}[/red]")
     finally:
         if image_path and os.path.exists(image_path):
             os.unlink(image_path)
@@ -272,11 +273,14 @@ def tags():
 @app.command("l", hidden=True)
 def list_problems(
     tag: str = typer.Option(None, "-t", "--tag", help="Filter by tag"),
-    diff: str = typer.Option(None, "-d", "--diff", help="Filter by difficulty"),
+    diff: str = typer.Option(None, "-d", "--diff",
+                             help="Filter by difficulty"),
     search: str = typer.Option(None, "-s", "--search", help="Search query"),
     limit: int = typer.Option(50, "-m", "--limit", help="Max results"),
-    high: str = typer.Option(None, "--high", help="Sort descending by: ac or freq"),
-    low: str = typer.Option(None, "--low", help="Sort ascending by: ac or freq"),
+    high: str = typer.Option(
+        None, "--high", help="Sort descending by: ac or freq"),
+    low: str = typer.Option(
+        None, "--low", help="Sort ascending by: ac or freq"),
 ):
     """List problems with optional filters."""
     filters = {}
@@ -337,7 +341,8 @@ def list_problems(
 @app.command("r", hidden=True)
 def random_problem(
     tag: str = typer.Option(None, "-t", "--tag", help="Filter by tag"),
-    diff: str = typer.Option(None, "-d", "--diff", help="Filter by difficulty"),
+    diff: str = typer.Option(None, "-d", "--diff",
+                             help="Filter by difficulty"),
 ):
     """Pick a random problem, optionally filtered."""
     import random as rand
@@ -371,7 +376,8 @@ def resolve_slug(slug_or_id: str) -> str:
     if not slug_or_id.isdigit():
         return slug_or_id
 
-    data = api.get_questions_list(limit=50, filters={"searchKeywords": slug_or_id})
+    data = api.get_questions_list(
+        limit=50, filters={"searchKeywords": slug_or_id})
     questions = data.get("questions", [])
     for q in questions:
         if str(q.get("frontendQuestionId")) == slug_or_id:
@@ -457,44 +463,16 @@ def get_target_file(arg: str) -> str:
 
 
 def pager(content: str):
-    """A simple pager that supports h/j/k/l navigation."""
-    from rich.ansi import AnsiDecoder
+    """A robust pager that supports images and standard navigation."""
+    # If we might have images, 'less -r' is better than 'less -R'
+    # as it passes through all control sequences including OSC for WezTerm.
+    pager_env = os.environ.get("PAGER", "less")
+    if "less" in pager_env and "-r" not in pager_env.lower():
+        # Add -r if it's less and doesn't already have it
+        # We use -r instead of -R to support high-res images (OSC sequences)
+        os.environ["PAGER"] = f"{pager_env} -r"
 
-    decoder = AnsiDecoder()
-    lines_text = list(decoder.decode(content))
-
-    # Reserve one line for the status bar
-    height = console.height - 1
-    offset = 0
-
-    def get_renderable():
-        page = lines_text[offset : offset + height]
-        status = Text.from_markup(
-            f"[reverse] {offset + 1}-{min(offset + height, len(lines_text))} / {
-                len(lines_text)
-            } [/reverse]"
-            f" [dim]h:1/2up j:dn k:up l:1/2dn q:quit[/dim]"
-        )
-        return Group(*page, status)
-
-    with Live(
-        get_renderable(), console=console, screen=True, auto_refresh=False
-    ) as live:
-        while True:
-            live.update(get_renderable(), refresh=True)
-            char = click.getchar().lower()
-            if char == "q":
-                break
-            elif char == "j":  # scroll down
-                if offset < len(lines_text) - height:
-                    offset += 1
-            elif char == "k":  # scroll up
-                if offset > 0:
-                    offset -= 1
-            elif char == "l":  # page-half-down
-                offset = min(offset + height // 2, max(0, len(lines_text) - height))
-            elif char == "h":  # page-half-up
-                offset = max(0, offset - height // 2)
+    click.echo_via_pager(content)
 
 
 @app.command()
@@ -525,41 +503,49 @@ def pick(slug: str):
     cleaned_md = md(str(soup))
     parts = re.split(r"TOKENSPLITIMAGE\d+TOKENSPLIT", cleaned_md)
 
-    with console.capture() as capture:
-        console.print(
-            f"[bold]{q['questionFrontendId']}. {q['title']}[/bold] (Difficulty: {
-                q['difficulty']
-            })\n"
-            f"https://leetcode.com/problems/{slug}/\n"
-        )
-        for i, part in enumerate(parts):
-            if part.strip():
-                console.print(Markdown(part))
-            if i < len(images):
-                url = images[i]
-                if url:
+    output = io.StringIO()
+    # Use a temporary console to render into our StringIO
+    temp_console = Console(
+        file=output, force_terminal=True, color_system="truecolor")
+
+    temp_console.print(
+        f"[bold]{q['questionFrontendId']}. {q['title']}[/bold] (Difficulty: {
+            q['difficulty']
+        })\n"
+        f"https://leetcode.com/problems/{slug}/\n"
+    )
+
+    for i, part in enumerate(parts):
+        if part.strip():
+            temp_console.print(Markdown(part))
+        if i < len(images):
+            url = images[i]
+            if url:
+                try:
+                    image_path, _ = download_image_to_tempfile(url)
+                    if not image_path:
+                        temp_console.print(f"[dim]Image: {url}[/dim]")
+                        continue
+
                     try:
-                        image_path, _ = download_image_to_tempfile(url)
-                        if not image_path:
-                            console.print(f"[dim]Image: {url}[/dim]")
-                            continue
-
-                        try:
-                            res = get_image_rendering(image_path, prefer_text=True)
-                            if res:
-                                console.file.write(res)
-                                if not res.endswith("\n"):
-                                    console.file.write("\n")
-                            else:
-                                console.print(f"[dim]Image: {url}[/dim]")
-                        except Exception:
-                            console.print(f"[dim]Image: {url}[/dim]")
-                        finally:
-                            os.unlink(image_path)
+                        # Prefer high-quality rendering (e.g. WezTerm) over text-based chafa
+                        res = get_image_rendering(
+                            image_path, prefer_text=False)
+                        if res:
+                            output.write(res)
+                            if not res.endswith("\n"):
+                                output.write("\n")
+                        else:
+                            temp_console.print(f"[dim]Image: {url}[/dim]")
                     except Exception:
-                        console.print(f"[dim]Image: {url}[/dim]")
+                        temp_console.print(f"[dim]Image: {url}[/dim]")
+                    finally:
+                        if image_path and os.path.exists(image_path):
+                            os.unlink(image_path)
+                except Exception:
+                    temp_console.print(f"[dim]Image: {url}[/dim]")
 
-    pager(capture.get())
+    pager(output.getvalue())
 
 
 @app.command("debug-image")
@@ -650,7 +636,8 @@ def exec_cmd(file_path: str):
 
     q = api.get_question_detail(slug)
     if not q:
-        console.print("[red]Could not match local file to a LeetCode problem.[/red]")
+        console.print(
+            "[red]Could not match local file to a LeetCode problem.[/red]")
         return
 
     question_id = q["questionId"]
@@ -747,7 +734,8 @@ def test(file_path: str):
 
     q = api.get_question_detail(slug)
     if not q:
-        console.print("[red]Could not match local file to a LeetCode problem.[/red]")
+        console.print(
+            "[red]Could not match local file to a LeetCode problem.[/red]")
         return
 
     question_id = q["questionId"]
@@ -755,7 +743,8 @@ def test(file_path: str):
     with open(file_path, "r") as f:
         code = f.read()
 
-    match_tc = re.search(r"\[TESTCASES\]\n(.*?)\n(?:\"\"\"|''')", code, re.DOTALL)
+    match_tc = re.search(
+        r"\[TESTCASES\]\n(.*?)\n(?:\"\"\"|''')", code, re.DOTALL)
     if match_tc:
         test_cases = match_tc.group(1).strip()
     else:
@@ -769,7 +758,8 @@ def test(file_path: str):
     console.print("[cyan]Running tests...[/cyan]")
     try:
         try:
-            sub_resp = api.test_code(slug, question_id, "python3", code, test_cases)
+            sub_resp = api.test_code(
+                slug, question_id, "python3", code, test_cases)
         except Exception as e:
             console.print(f"[red]Error starting test: {e}[/red]")
             return
@@ -798,7 +788,8 @@ def test(file_path: str):
                 console.print(".", end="", style="dim", flush=True)
                 continue
 
-            console.print(f"\n[bold]Test Result: {check.get('status_msg')}[/bold]")
+            console.print(f"\n[bold]Test Result: {
+                          check.get('status_msg')}[/bold]")
 
             runtime = check.get("status_runtime")
             if runtime:
@@ -811,7 +802,8 @@ def test(file_path: str):
             else:
                 expected = check.get("expected_code_answer", [])
                 actual = check.get("code_answer", [])
-                stdout = check.get("std_output_list", check.get("code_output", []))
+                stdout = check.get("std_output_list",
+                                   check.get("code_output", []))
 
                 # LeetCode's backend API returns a trailing empty string due to newline splitting artifacts
                 if isinstance(expected, list) and expected and expected[-1] == "":
@@ -839,10 +831,11 @@ def test(file_path: str):
 
                     if args_per_case > 0 and i * args_per_case < len(raw_tc_lines):
                         inputs = raw_tc_lines[
-                            i * args_per_case : (i + 1) * args_per_case
+                            i * args_per_case: (i + 1) * args_per_case
                         ]
                         console.print(
-                            f"  Input:    [magenta]{', '.join(inputs)}[/magenta]"
+                            f"  Input:    [magenta]{
+                                ', '.join(inputs)}[/magenta]"
                         )
 
                     exp = (
