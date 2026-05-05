@@ -91,55 +91,27 @@ def render_image_with_wezterm(image_path: str, width: str | None = None) -> str 
 
 
 def get_image_rendering(image_path: str, prefer_text: bool = False) -> str | None:
-    """Try to render an image using wezterm imgcat and estimate height for pager.
-    
-    Uses original width if it fits in the terminal, otherwise scales down.
-    """
+    """Try to render an image using wezterm imgcat."""
     if prefer_text:
         return None
 
     # Constants for estimation
-    CELL_W_PX = 10  # Typical width of a character cell in pixels
-    CELL_H_PX = 20  # Typical height of a character cell in pixels
+    CELL_W_PX = 10
     MAX_W_CELLS = max(20, console.width - 4)
     MAX_W_PX = MAX_W_CELLS * CELL_W_PX
 
     dims = get_image_dimensions(image_path)
     
     width_arg = str(MAX_W_CELLS)
-    est_width_cells = MAX_W_CELLS
-    img_aspect = 1.0
 
     if dims:
-        img_w, img_h = dims
-        img_aspect = img_h / img_w
+        img_w, _ = dims
         if img_w < MAX_W_PX:
-            # Use original width in pixels to avoid upscaling
             width_arg = f"{img_w}px"
-            est_width_cells = img_w / CELL_W_PX
         else:
-            # Scale down to terminal width
             width_arg = str(MAX_W_CELLS)
-            est_width_cells = MAX_W_CELLS
     
-    res = render_image_with_wezterm(image_path, width=width_arg)
-    if not res:
-        return None
-
-    # Estimate height in terminal lines to pad with newlines for the pager.
-    # terminal_height = (rendered_width_cells * img_h / img_w) * (cell_width / cell_height)
-    height = int(est_width_cells * img_aspect * (CELL_W_PX / CELL_H_PX))
-    # Clamp height to something reasonable
-    height = max(1, min(height, 100))
-    
-    # Pre-padding technique:
-    # 1. Move to start of line (\r)
-    # 2. Print 'height' newlines to reserve space in the pager/terminal.
-    # 3. Move cursor back UP 'height' lines.
-    # 4. Print the image (which will then fill that space and move cursor back down).
-    padding = "\n" * height
-    cursor_up = f"\x1b[{height}A"
-    return "\r" + padding + cursor_up + res
+    return render_image_with_wezterm(image_path, width=width_arg)
 
 
 def render_image(image_path: str) -> bool:
@@ -147,6 +119,7 @@ def render_image(image_path: str) -> bool:
     res = get_image_rendering(image_path)
     if res:
         console.file.write(res)
+        console.file.flush()
         return True
     return False
 
@@ -479,16 +452,9 @@ def get_target_file(arg: str) -> str:
 
 
 def pager(content: str):
-    """A robust pager that supports images and standard navigation."""
-    # If we might have images, 'less -r' is better than 'less -R'
-    # as it passes through all control sequences including OSC for WezTerm.
-    pager_env = os.environ.get("PAGER", "less")
-    if "less" in pager_env and "-r" not in pager_env.lower():
-        # Add -r if it's less and doesn't already have it
-        # We use -r instead of -R to support high-res images (OSC sequences)
-        os.environ["PAGER"] = f"{pager_env} -r"
-
-    click.echo_via_pager(content)
+    """Print content directly to the terminal."""
+    console.file.write(content)
+    console.file.flush()
 
 
 @app.command()
