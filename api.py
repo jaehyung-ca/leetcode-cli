@@ -24,7 +24,7 @@ def _graphql_request(query, variables=None):
     response.raise_for_status()
     return response.json()
 
-def get_questions_list(skip=0, limit=100, filters=None):
+def get_questions_list(skip=0, limit=100, filters=None, category_slug=""):
     query = """
     query problemsetQuestionList($categorySlug: String, $limit: Int, $skip: Int, $filters: QuestionListFilterInput) {
       problemsetQuestionList: questionList(
@@ -50,7 +50,7 @@ def get_questions_list(skip=0, limit=100, filters=None):
     }
     """
     variables = {
-        "categorySlug": "",
+        "categorySlug": category_slug,
         "skip": skip,
         "limit": limit,
         "filters": filters or {}

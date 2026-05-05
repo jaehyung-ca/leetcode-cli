@@ -14,6 +14,8 @@ from markdownify import markdownify as md
 from pathlib import Path
 from urllib.parse import urlparse
 import json
+import re
+from bs4 import BeautifulSoup
 from importlib.metadata import version, PackageNotFoundError
 
 try:
@@ -343,22 +345,38 @@ def random_problem(
         d_map = {"easy": "EASY", "medium": "MEDIUM", "hard": "HARD"}
         filters["difficulty"] = d_map.get(diff.lower(), "EASY")
 
-    data = api.get_questions_list(limit=1, filters=filters)
+    data = api.get_questions_list(limit=1, filters=filters, category_slug="algorithms")
     total = data.get("total", 0)
+    category_slug = "algorithms"
+
+    if total == 0:
+        data = api.get_questions_list(limit=1, filters=filters)
+        total = data.get("total", 0)
+        category_slug = ""
 
     if total == 0:
         console.print("[red]No problems found matching criteria.[/red]")
         return
 
-    skip = rand.randint(0, total - 1)
-    data = api.get_questions_list(limit=1, skip=skip, filters=filters)
-    q = data.get("questions", [])
-    if not q:
-        console.print("[red]Failed to fetch random problem.[/red]")
-        return
+    # Try up to 10 times to find a Python problem
+    for _ in range(10):
+        skip = rand.randint(0, total - 1)
+        data = api.get_questions_list(
+            limit=1, skip=skip, filters=filters, category_slug=category_slug)
+        q_list = data.get("questions", [])
+        if not q_list:
+            continue
 
-    slug = q[0].get("titleSlug")
-    pick(slug)
+        slug = q_list[0].get("titleSlug")
+        detail = api.get_question_detail(slug)
+        if detail:
+            snippets = detail.get("codeSnippets", [])
+            if any(s.get("langSlug") in ["python", "python3"] for s in snippets):
+                _display_question(detail)
+                return
+
+    console.print(
+        "[red]Could not find a Python problem after multiple attempts.[/red]")
 
 
 def resolve_slug(slug_or_id: str) -> str:
@@ -430,8 +448,6 @@ def compare_answers(exp, act, status_msg: str | None = None) -> bool:
 
 
 def get_target_file(arg: str) -> str:
-    import re
-
     if os.path.exists(arg) and arg.endswith(".py"):
         return arg
 
@@ -457,19 +473,9 @@ def pager(content: str):
     console.file.flush()
 
 
-@app.command()
-@app.command("p", hidden=True)
-def pick(slug: str):
-    """Show details of a specific problem."""
-    slug = resolve_slug(slug)
-    q = api.get_question_detail(slug)
-    if not q:
-        console.print("[red]Problem not found.[/red]")
-        return
-
-    import re
-    from bs4 import BeautifulSoup
-
+def _display_question(q: dict):
+    """Render question details to terminal."""
+    slug = q.get("titleSlug")
     html = q.get("content", "")
     soup = BeautifulSoup(html, "html.parser")
     images = []
@@ -528,6 +534,19 @@ def pick(slug: str):
                     temp_console.print(f"[dim]Image: {url}[/dim]")
 
     pager(output.getvalue())
+
+
+@app.command()
+@app.command("p", hidden=True)
+def pick(slug: str):
+    """Show details of a specific problem."""
+    slug = resolve_slug(slug)
+    q = api.get_question_detail(slug)
+    if not q:
+        console.print("[red]Problem not found.[/red]")
+        return
+
+    _display_question(q)
 
 
 @app.command("debug-image")
