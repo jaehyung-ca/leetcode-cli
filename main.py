@@ -4,13 +4,22 @@ import subprocess
 import shutil
 import hashlib
 import typer
-from rich.console import Console
+from rich.console import Console, Group
 from rich.table import Table
 from rich.markdown import Markdown
+from rich.live import Live
+from rich.text import Text
+import click
 from markdownify import markdownify as md
 from pathlib import Path
 from urllib.parse import urlparse
 import json
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("leetcode-cli")
+except PackageNotFoundError:
+    __version__ = "unknown"
 
 from auth import extract_cookies
 import api
@@ -36,71 +45,86 @@ def build_wezterm_imgcat_command(image_path: str) -> list[str]:
     return command
 
 
-def render_image_with_wezterm(image_path: str) -> bool:
+def render_image_with_wezterm(image_path: str) -> str | None:
     """Render an image inline when running inside WezTerm."""
     if not shutil.which("wezterm"):
-        return False
+        return None
 
     if not is_wezterm_session():
-        return False
+        return None
 
     try:
         result = subprocess.run(
             build_wezterm_imgcat_command(image_path),
-            stdout=console.file,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
             timeout=10,
         )
-        return result.returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+    return None
 
 
-def render_image_with_chafa(image_path: str) -> bool:
+def render_image_with_chafa(image_path: str) -> str | None:
     """Render an image using chafa (text-based, survives tmux copy-mode)."""
     if not shutil.which("chafa"):
-        return False
+        return None
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["chafa", "--format", "symbols", image_path],
-            stdout=console.file,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             check=False,
         )
-        return True
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", errors="ignore")
     except Exception:
-        return False
+        pass
+    return None
 
 
-def render_image_with_catimg(image_path: str) -> bool:
+def render_image_with_catimg(image_path: str) -> str | None:
     """Render an image using catimg."""
     if not shutil.which("catimg"):
-        return False
+        return None
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["catimg", image_path],
-            stdout=console.file,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             check=False,
         )
-        return True
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", errors="ignore")
     except Exception:
-        return False
+        pass
+    return None
+
+
+def get_image_rendering(image_path: str, prefer_text: bool = False) -> str | None:
+    """Try various methods to render an image and return the output."""
+    if prefer_text:
+        return (
+            render_image_with_chafa(image_path)
+            or render_image_with_catimg(image_path)
+            or render_image_with_wezterm(image_path)
+        )
+    return (
+        render_image_with_wezterm(image_path)
+        or render_image_with_chafa(image_path)
+        or render_image_with_catimg(image_path)
+    )
 
 
 def render_image(image_path: str) -> bool:
     """Try various methods to render an image in the terminal."""
-    # 1. WezTerm (Highest quality, but doesn't survive tmux copy-mode)
-    if render_image_with_wezterm(image_path):
+    res = get_image_rendering(image_path)
+    if res:
+        console.file.write(res)
         return True
-
-    # 2. Chafa (Text-based symbols, survives tmux copy-mode)
-    if render_image_with_chafa(image_path):
-        return True
-
-    # 3. Catimg (Fallback text-based)
-    if render_image_with_catimg(image_path):
-        return True
-
     return False
 
 
@@ -184,7 +208,9 @@ def debug_render_image(url: str):
         )
         console.print(f"wezterm_imgcat_returncode={result.returncode}")
         console.print(
-            f"wezterm_imgcat_stderr={result.stderr.decode(errors='replace').strip() or '<empty>'}"
+            f"wezterm_imgcat_stderr={
+                result.stderr.decode(errors='replace').strip() or '<empty>'
+            }"
         )
     except subprocess.TimeoutExpired as exc:
         console.print(
@@ -195,6 +221,28 @@ def debug_render_image(url: str):
     finally:
         if image_path and os.path.exists(image_path):
             os.unlink(image_path)
+
+
+def version_callback(value: bool):
+    if value:
+        console.print(f"leetcode-cli version {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        None, "--version", "-v", callback=version_callback, is_eager=True
+    ),
+):
+    pass
+
+
+@app.command()
+@app.command("v", hidden=True)
+def version():
+    """Show the version of leetcode-cli."""
+    console.print(f"leetcode-cli version {__version__}")
 
 
 @app.command()
@@ -408,6 +456,47 @@ def get_target_file(arg: str) -> str:
     return arg
 
 
+def pager(content: str):
+    """A simple pager that supports h/j/k/l navigation."""
+    from rich.ansi import AnsiDecoder
+
+    decoder = AnsiDecoder()
+    lines_text = list(decoder.decode(content))
+
+    # Reserve one line for the status bar
+    height = console.height - 1
+    offset = 0
+
+    def get_renderable():
+        page = lines_text[offset : offset + height]
+        status = Text.from_markup(
+            f"[reverse] {offset + 1}-{min(offset + height, len(lines_text))} / {
+                len(lines_text)
+            } [/reverse]"
+            f" [dim]h:1/2up j:dn k:up l:1/2dn q:quit[/dim]"
+        )
+        return Group(*page, status)
+
+    with Live(
+        get_renderable(), console=console, screen=True, auto_refresh=False
+    ) as live:
+        while True:
+            live.update(get_renderable(), refresh=True)
+            char = click.getchar().lower()
+            if char == "q":
+                break
+            elif char == "j":  # scroll down
+                if offset < len(lines_text) - height:
+                    offset += 1
+            elif char == "k":  # scroll up
+                if offset > 0:
+                    offset -= 1
+            elif char == "l":  # page-half-down
+                offset = min(offset + height // 2, max(0, len(lines_text) - height))
+            elif char == "h":  # page-half-up
+                offset = max(0, offset - height // 2)
+
+
 @app.command()
 @app.command("p", hidden=True)
 def pick(slug: str):
@@ -418,10 +507,6 @@ def pick(slug: str):
         console.print("[red]Problem not found.[/red]")
         return
 
-    console.print(
-        f"[bold]{q['questionFrontendId']}. {q['title']}[/bold] (Difficulty: {q['difficulty']})\n"
-        f"https://leetcode.com/problems/{slug}/\n"
-    )
     import re
     from bs4 import BeautifulSoup
 
@@ -440,27 +525,41 @@ def pick(slug: str):
     cleaned_md = md(str(soup))
     parts = re.split(r"TOKENSPLITIMAGE\d+TOKENSPLIT", cleaned_md)
 
-    for i, part in enumerate(parts):
-        if part.strip():
-            console.print(Markdown(part))
-        if i < len(images):
-            url = images[i]
-            if url:
-                try:
-                    image_path, _ = download_image_to_tempfile(url)
-                    if not image_path:
-                        console.print(f"[dim]Image: {url}[/dim]")
-                        continue
-
+    with console.capture() as capture:
+        console.print(
+            f"[bold]{q['questionFrontendId']}. {q['title']}[/bold] (Difficulty: {
+                q['difficulty']
+            })\n"
+            f"https://leetcode.com/problems/{slug}/\n"
+        )
+        for i, part in enumerate(parts):
+            if part.strip():
+                console.print(Markdown(part))
+            if i < len(images):
+                url = images[i]
+                if url:
                     try:
-                        if not render_image(image_path):
+                        image_path, _ = download_image_to_tempfile(url)
+                        if not image_path:
                             console.print(f"[dim]Image: {url}[/dim]")
+                            continue
+
+                        try:
+                            res = get_image_rendering(image_path, prefer_text=True)
+                            if res:
+                                console.file.write(res)
+                                if not res.endswith("\n"):
+                                    console.file.write("\n")
+                            else:
+                                console.print(f"[dim]Image: {url}[/dim]")
+                        except Exception:
+                            console.print(f"[dim]Image: {url}[/dim]")
+                        finally:
+                            os.unlink(image_path)
                     except Exception:
                         console.print(f"[dim]Image: {url}[/dim]")
-                    finally:
-                        os.unlink(image_path)
-                except Exception:
-                    console.print(f"[dim]Image: {url}[/dim]")
+
+    pager(capture.get())
 
 
 @app.command("debug-image")
@@ -504,7 +603,9 @@ def edit(slug: str):
         )
 
     if should_write:
-        header = f'"""{q["questionFrontendId"]}. {q["title"]} (Difficulty: {q["difficulty"]})\n'
+        header = f'"""{q["questionFrontendId"]}. {q["title"]} (Difficulty: {
+            q["difficulty"]
+        })\n'
         header += f"https://leetcode.com/problems/{slug}/\n"
 
         testcases = q.get("exampleTestcases", "")
@@ -531,7 +632,9 @@ def exec_cmd(file_path: str):
     file_path = get_target_file(file_path)
     if not os.path.exists(file_path):
         console.print(
-            f"[red]Could not find a valid matching file for '{file_path}' in cache directory.[/red]"
+            f"[red]Could not find a valid matching file for '{
+                file_path
+            }' in cache directory.[/red]"
         )
         return
 
@@ -627,7 +730,9 @@ def test(file_path: str):
     file_path = get_target_file(file_path)
     if not os.path.exists(file_path):
         console.print(
-            f"[red]Could not find a valid matching file for '{file_path}' in cache directory.[/red]"
+            f"[red]Could not find a valid matching file for '{
+                file_path
+            }' in cache directory.[/red]"
         )
         return
 
@@ -672,7 +777,9 @@ def test(file_path: str):
         run_id = sub_resp.get("interpret_id")
         if not run_id:
             console.print(
-                f"[red]Test failed (Often due to missing Cookies/Cloudflare if non-JSON, or rate limit): {sub_resp}[/red]"
+                f"[red]Test failed (Often due to missing Cookies/Cloudflare if non-JSON, or rate limit): {
+                    sub_resp
+                }[/red]"
             )
             return
 
