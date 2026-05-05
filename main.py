@@ -59,17 +59,6 @@ def get_image_dimensions(image_path: str) -> tuple[int, int] | None:
     return None
 
 
-def build_wezterm_imgcat_command(image_path: str, width: int | None = None) -> str:
-    """Build the command to render an image using wezterm imgcat, with optional tmux passthrough."""
-    # Use wezterm imgcat with specified or auto width.
-    w_arg = f"--width {width}" if width else "--width auto"
-    command = f"wezterm imgcat {w_arg} {shlex.quote(image_path)}"
-    if os.environ.get("TMUX"):
-        # Wrap in tmux DCS passthrough
-        command += " | sed 's|\\x1b|\\x1bPtmux;\\x1b\\x1b|g; s|$|\\x1b\\\\|'"
-    return command
-
-
 def render_image_with_wezterm(image_path: str, width: str | None = None) -> str | None:
     """Render an image inline when running inside WezTerm."""
     if not shutil.which("wezterm"):
@@ -81,22 +70,24 @@ def render_image_with_wezterm(image_path: str, width: str | None = None) -> str 
 
     try:
         # width can be a number (cells) or a string like "100px"
-        w_arg = f"--width {width}" if width else "--width auto"
-        command = f"wezterm imgcat {w_arg} {shlex.quote(image_path)}"
-        if os.environ.get("TMUX"):
-            # Wrap in tmux DCS passthrough
-            command += " | sed 's|\\x1b|\\x1bPtmux;\\x1b\\x1b|g; s|$|\\x1b\\\\|'"
-        
+        w_arg = width if width else "auto"
+        args = ["wezterm", "imgcat", "--width", w_arg, image_path]
+
         result = subprocess.run(
-            command,
-            shell=True,
+            args,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
             timeout=10,
         )
         if result.returncode == 0:
-            return result.stdout.decode("utf-8", errors="ignore")
+            output = result.stdout
+            if os.environ.get("TMUX"):
+                # Wrap in tmux DCS passthrough: ESC P tmux ; ESC [data] ESC \
+                # All ESC bytes inside [data] must be doubled.
+                output = b"\x1bPtmux;" + \
+                    output.replace(b"\x1b", b"\x1b\x1b") + b"\x1b\\"
+            return output.decode("utf-8", errors="ignore")
     except Exception:
         pass
     return None
@@ -229,23 +220,16 @@ def debug_render_image(url: str):
         success = render_image(image_path)
         console.print(f"render_image_success={success}")
 
-        command = build_wezterm_imgcat_command(image_path)
-        console.print(f"wezterm_imgcat_command={command}")
-        result = subprocess.run(
-            command,
-            shell=True,
-            stdout=console.file,
-            stderr=subprocess.PIPE,
-            text=False,
-            check=False,
-            timeout=10,
-        )
-        console.print(f"wezterm_imgcat_returncode={result.returncode}")
-        console.print(
-            f"wezterm_imgcat_stderr={
-                result.stderr.decode(errors='replace').strip() or '<empty>'
-            }"
-        )
+        # Test the direct wezterm rendering component
+        res = render_image_with_wezterm(image_path)
+        if res:
+            console.print("[bold]Testing render_image_with_wezterm() output...[/bold]")
+            console.file.write(res)
+            console.file.flush()
+            console.print("\n[bold]Image rendered above.[/bold]")
+        else:
+            console.print("[red]render_image_with_wezterm() returned None[/red]")
+            
     except subprocess.TimeoutExpired as exc:
         console.print(
             f"[red]wezterm_imgcat_timeout={
