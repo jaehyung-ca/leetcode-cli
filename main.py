@@ -4,6 +4,7 @@ import time
 import subprocess
 import shutil
 import hashlib
+import shlex
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -36,25 +37,59 @@ def is_wezterm_session() -> bool:
     )
 
 
-def build_wezterm_imgcat_command(image_path: str) -> list[str]:
-    command = ["wezterm", "imgcat", "--width", "auto"]
+def get_image_dimensions(image_path: str) -> tuple[int, int] | None:
+    """Get (width, height) of an image using 'identify'."""
+    if not shutil.which("identify"):
+        return None
+    try:
+        result = subprocess.run(
+            ["identify", "-format", "%w %h", image_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.split()
+            if len(parts) == 2:
+                return int(parts[0]), int(parts[1])
+    except Exception:
+        pass
+    return None
+
+
+def build_wezterm_imgcat_command(image_path: str, width: int | None = None) -> str:
+    """Build the command to render an image using wezterm imgcat, with optional tmux passthrough."""
+    # Use wezterm imgcat with specified or auto width.
+    w_arg = f"--width {width}" if width else "--width auto"
+    command = f"wezterm imgcat {w_arg} {shlex.quote(image_path)}"
     if os.environ.get("TMUX"):
-        command.extend(["--tmux-passthru", "enable"])
-    command.append(image_path)
+        # Wrap in tmux DCS passthrough
+        command += " | sed 's|\\x1b|\\x1bPtmux;\\x1b\\x1b|g; s|$|\\x1b\\\\|'"
     return command
 
 
-def render_image_with_wezterm(image_path: str) -> str | None:
+def render_image_with_wezterm(image_path: str, width: str | None = None) -> str | None:
     """Render an image inline when running inside WezTerm."""
     if not shutil.which("wezterm"):
         return None
 
-    if not is_wezterm_session():
+    # Even if not in a wezterm session, we might be in tmux which is inside wezterm
+    if not is_wezterm_session() and not os.environ.get("TMUX"):
         return None
 
     try:
+        # width can be a number (cells) or a string like "100px"
+        w_arg = f"--width {width}" if width else "--width auto"
+        command = f"wezterm imgcat {w_arg} {shlex.quote(image_path)}"
+        if os.environ.get("TMUX"):
+            # Wrap in tmux DCS passthrough
+            command += " | sed 's|\\x1b|\\x1bPtmux;\\x1b\\x1b|g; s|$|\\x1b\\\\|'"
+        
         result = subprocess.run(
-            build_wezterm_imgcat_command(image_path),
+            command,
+            shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -68,63 +103,55 @@ def render_image_with_wezterm(image_path: str) -> str | None:
 
 
 def get_image_rendering(image_path: str, prefer_text: bool = False) -> str | None:
-    """Try various methods to render an image with high quality and pager compatibility.
+    """Try to render an image using wezterm imgcat and estimate height for pager.
     
-    We use imgcat for high-res rendering if possible, otherwise chafa.
+    Uses original width if it fits in the terminal, otherwise scales down.
     """
-    # Use symbols mode to get a reliable height estimate and a high-quality fallback.
-    width = max(20, console.width - 4)
-    sym_res = render_image_with_chafa(image_path, fmt="symbols", size=f"{width}", symbols="all")
-    height = sym_res.count("\n") if sym_res else 0
-
-    if not prefer_text and is_wezterm_session():
-        try:
-            import io
-            from imgcat import imgcat
-            with open(image_path, "rb") as f:
-                data = f.read()
-            # Capture imgcat output into a buffer
-            buf = io.BytesIO()
-            imgcat(data, filename=os.path.basename(image_path), width=width, fp=buf)
-            res = buf.getvalue().decode("utf-8", errors="ignore")
-            if res:
-                # Pad with newlines AFTER the high-res sequence to push cursor down.
-                # Increased limit to allow for higher resolution in the pager.
-                if len(res) < 32000:
-                    return res + ("\n" * height)
-        except Exception:
-            pass
-
-    # Fallback to high-fidelity symbols mode (ANSI art) if imgcat fails or sequence too large.
-    return sym_res
-
-
-def render_image_with_chafa(
-    image_path: str, fmt: str = "symbols", size: str | None = None, symbols: str | None = None
-) -> str | None:
-    """Render an image using chafa with advanced quality options."""
-    if not shutil.which("chafa"):
+    if prefer_text:
         return None
-    try:
-        cmd = ["chafa", "--format", fmt, "--color-space", "din99d", "--work", "9"]
-        if size:
-            cmd.extend(["--size", size])
-        if symbols:
-            cmd.extend(["--symbols", symbols])
-        
-        cmd.append(image_path)
-        
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode == 0:
-            return result.stdout.decode("utf-8", errors="ignore")
-    except Exception:
-        pass
-    return None
+
+    # Constants for estimation
+    CELL_W_PX = 10  # Typical width of a character cell in pixels
+    CELL_H_PX = 20  # Typical height of a character cell in pixels
+    MAX_W_CELLS = max(20, console.width - 4)
+    MAX_W_PX = MAX_W_CELLS * CELL_W_PX
+
+    dims = get_image_dimensions(image_path)
+    
+    width_arg = str(MAX_W_CELLS)
+    est_width_cells = MAX_W_CELLS
+    img_aspect = 1.0
+
+    if dims:
+        img_w, img_h = dims
+        img_aspect = img_h / img_w
+        if img_w < MAX_W_PX:
+            # Use original width in pixels to avoid upscaling
+            width_arg = f"{img_w}px"
+            est_width_cells = img_w / CELL_W_PX
+        else:
+            # Scale down to terminal width
+            width_arg = str(MAX_W_CELLS)
+            est_width_cells = MAX_W_CELLS
+    
+    res = render_image_with_wezterm(image_path, width=width_arg)
+    if not res:
+        return None
+
+    # Estimate height in terminal lines to pad with newlines for the pager.
+    # terminal_height = (rendered_width_cells * img_h / img_w) * (cell_width / cell_height)
+    height = int(est_width_cells * img_aspect * (CELL_W_PX / CELL_H_PX))
+    # Clamp height to something reasonable
+    height = max(1, min(height, 100))
+    
+    # Pre-padding technique:
+    # 1. Move to start of line (\r)
+    # 2. Print 'height' newlines to reserve space in the pager/terminal.
+    # 3. Move cursor back UP 'height' lines.
+    # 4. Print the image (which will then fill that space and move cursor back down).
+    padding = "\n" * height
+    cursor_up = f"\x1b[{height}A"
+    return "\r" + padding + cursor_up + res
 
 
 def render_image(image_path: str) -> bool:
@@ -178,8 +205,6 @@ def debug_render_image(url: str):
     console.print(f"WEZTERM_EXECUTABLE={os.environ.get('WEZTERM_EXECUTABLE')}")
     console.print(f"TMUX={os.environ.get('TMUX')}")
     console.print(f"which wezterm={shutil.which('wezterm')}")
-    console.print(f"which chafa={shutil.which('chafa')}")
-    console.print(f"which catimg={shutil.which('catimg')}")
     console.print(f"is_wezterm_session={is_wezterm_session()}")
 
     image_path = None
@@ -205,9 +230,10 @@ def debug_render_image(url: str):
         console.print(f"render_image_success={success}")
 
         command = build_wezterm_imgcat_command(image_path)
-        console.print(f"wezterm_imgcat_command={' '.join(command)}")
+        console.print(f"wezterm_imgcat_command={command}")
         result = subprocess.run(
             command,
+            shell=True,
             stdout=console.file,
             stderr=subprocess.PIPE,
             text=False,
@@ -537,7 +563,7 @@ def pick(slug: str):
                         continue
 
                     try:
-                        # Prefer high-quality rendering (e.g. WezTerm) over text-based chafa
+                        # Use wezterm imgcat for high-quality rendering if possible
                         res = get_image_rendering(
                             image_path, prefer_text=False)
                         if res:
