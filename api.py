@@ -38,6 +38,7 @@ def get_questions_list(skip=0, limit=100, filters=None, category_slug=""):
           acRate
           difficulty
           frontendQuestionId: questionFrontendId
+          status
           title
           titleSlug
           topicTags {
@@ -64,6 +65,7 @@ def get_question_detail(title_slug: str):
       question(titleSlug: $titleSlug) {
         questionId
         questionFrontendId
+        status
         title
         titleSlug
         content

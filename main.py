@@ -305,12 +305,21 @@ def list_problems(
     questions = data.get("questions", [])
 
     table = Table(title="LeetCode Problems")
+    table.add_column("Status", justify="center")
     table.add_column("ID", style="dim")
     table.add_column("Title")
     table.add_column("Difficulty")
     table.add_column("Acceptance")
 
     for q in questions:
+        status_val = q.get("status")
+        if status_val == "ac":
+            status_mark = "[green]✔[/green]"
+        elif status_val == "notac":
+            status_mark = "[red]✘[/red]"
+        else:
+            status_mark = ""
+
         diff_color = (
             "green"
             if q["difficulty"] == "Easy"
@@ -320,6 +329,7 @@ def list_problems(
         )
         ac_rate = str(round(q.get("acRate", 0), 2)) + "%"
         table.add_row(
+            status_mark,
             q["frontendQuestionId"],
             q["title"],
             f"[{diff_color}]{q['difficulty']}[/{diff_color}]",
@@ -496,8 +506,15 @@ def _display_question(q: dict):
     temp_console = Console(
         file=output, force_terminal=True, color_system="truecolor")
 
+    status_val = q.get("status")
+    status_mark = ""
+    if status_val == "ac":
+        status_mark = " [green]✔[/green]"
+    elif status_val == "notac":
+        status_mark = " [red]✘[/red]"
+
     temp_console.print(
-        f"[bold]{q['questionFrontendId']}. {q['title']}[/bold] (Difficulty: {
+        f"[bold]{q['questionFrontendId']}. {q['title']}{status_mark}[/bold] (Difficulty: {
             q['difficulty']
         })\n"
         f"https://leetcode.com/problems/{slug}/\n"
