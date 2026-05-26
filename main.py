@@ -679,6 +679,7 @@ def exec_cmd(file_path: str):
             state = check.get("state")
             if state == "PENDING" or state == "STARTED":
                 console.print(".", end="", style="dim")
+                console.file.flush()
                 continue
 
             console.print(f"\n[bold]Result: {check.get('status_msg')}[/bold]")
@@ -803,7 +804,8 @@ def test(file_path: str):
 
             state = check.get("state")
             if state == "PENDING" or state == "STARTED":
-                console.print(".", end="", style="dim", flush=True)
+                console.print(".", end="", style="dim")
+                console.file.flush()
                 continue
 
             console.print(f"\n[bold]Test Result: {
