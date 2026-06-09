@@ -513,10 +513,27 @@ def _display_question(q: dict):
     elif status_val == "notac":
         status_mark = " [red]✘[/red]"
 
+    diff_val = q.get("difficulty", "Unknown")
+    diff_color = (
+        "green"
+        if diff_val == "Easy"
+        else "yellow"
+        if diff_val == "Medium"
+        else "red"
+        if diff_val == "Hard"
+        else "white"
+    )
+
+    tags_list = q.get("topicTags") or []
+    tag_names = [t["name"] for t in tags_list if t.get("name")]
+    if tag_names:
+        tags_str = ", ".join(f"[cyan]{tag}[/cyan]" for tag in tag_names)
+        tags_display = f" | Tags: {tags_str}"
+    else:
+        tags_display = ""
+
     temp_console.print(
-        f"[bold]{q['questionFrontendId']}. {q['title']}{status_mark}[/bold] (Difficulty: {
-            q['difficulty']
-        })\n"
+        f"[bold]{q['questionFrontendId']}. {q['title']}{status_mark}[/bold] (Difficulty: [{diff_color}]{diff_val}[/{diff_color}]{tags_display})\n"
         f"https://leetcode.com/problems/{slug}/\n"
     )
 
