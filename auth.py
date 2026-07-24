@@ -84,26 +84,61 @@ def _read_leetcode_cookies(cookies_db_path):
         finally:
             conn.close()
 
-def extract_cookies():
-    """Extract LEETCODE_SESSION and csrftoken directly using native firefox parsing."""
+def _read_leetcode_cookies_from_firefox():
+    """Return LeetCode cookies from Firefox's cookies.sqlite, or {} if unavailable."""
     cookies_db = _find_firefox_cookies_db()
     if not cookies_db or not cookies_db.is_file():
-        console.print("[bold yellow]Could not find a Firefox cookies.sqlite.[/bold yellow]")
-        return False
-        
-    values = _read_leetcode_cookies(cookies_db)
-    if "csrftoken" not in values or "LEETCODE_SESSION" not in values:
-        console.print("[bold yellow]Could not find LeetCode cookies in Firefox.[/bold yellow]")
-        return False
+        return {}
+    return _read_leetcode_cookies(cookies_db)
 
-    update_config("LEETCODE_SESSION", values["LEETCODE_SESSION"])
-    update_config("csrftoken", values["csrftoken"])
-    
-    # Store everything we got just in case we need cf_clearance
-    update_config("ALL_COOKIES", values)
-    
-    console.print(f"[bold green]Successfully extracted LeetCode cookies natively from Firefox sqlite![/bold green]")
-    return True
+
+def _read_leetcode_cookies_from_brave():
+    """Return LeetCode cookies from Brave via browser_cookie3, or {} if unavailable.
+
+    Brave is Chromium-based and stores cookie values encrypted with a key from
+    the OS keyring, so we lean on browser_cookie3 to handle decryption for us.
+    """
+    try:
+        import browser_cookie3
+    except ImportError:
+        return {}
+
+    wanted = {"csrftoken", "LEETCODE_SESSION", "cf_clearance"}
+    try:
+        jar = browser_cookie3.brave(domain_name="leetcode.com")
+    except Exception:
+        return {}
+
+    values = {}
+    for cookie in jar:
+        if cookie.name in wanted and cookie.name not in values:
+            values[cookie.name] = cookie.value
+    return values
+
+
+def extract_cookies():
+    """Extract LEETCODE_SESSION and csrftoken from Firefox or Brave."""
+    sources = [
+        ("Brave", _read_leetcode_cookies_from_brave),
+        ("Firefox", _read_leetcode_cookies_from_firefox),
+    ]
+
+    for name, reader in sources:
+        values = reader()
+        if "csrftoken" not in values or "LEETCODE_SESSION" not in values:
+            continue
+
+        update_config("LEETCODE_SESSION", values["LEETCODE_SESSION"])
+        update_config("csrftoken", values["csrftoken"])
+
+        # Store everything we got just in case we need cf_clearance
+        update_config("ALL_COOKIES", values)
+
+        console.print(f"[bold green]Successfully extracted LeetCode cookies from {name}![/bold green]")
+        return True
+
+    console.print("[bold yellow]Could not find LeetCode cookies in Firefox or Brave.[/bold yellow]")
+    return False
 
 def get_auth_cookies() -> dict:
     all_cookies = get_config("ALL_COOKIES", {})
