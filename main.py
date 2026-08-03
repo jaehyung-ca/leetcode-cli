@@ -498,6 +498,13 @@ def _display_question(q: dict):
         images.append(url)
         img.replace_with(token)
 
+    for tag in soup.find_all("sup"):
+        text = tag.get_text()
+        tag.replace_with(f"^({text})" if len(text) > 1 else f"^{text}")
+    for tag in soup.find_all("sub"):
+        text = tag.get_text()
+        tag.replace_with(f"_({text})" if len(text) > 1 else f"_{text}")
+
     cleaned_md = md(str(soup))
     parts = re.split(r"TOKENSPLITIMAGE\d+TOKENSPLIT", cleaned_md)
 
