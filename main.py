@@ -1,21 +1,14 @@
 import io
 import os
-import time
 import subprocess
 import shutil
 import hashlib
-import shlex
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.markdown import Markdown
-import click
-from markdownify import markdownify as md
 from pathlib import Path
 from urllib.parse import urlparse
-import json
-import re
-from bs4 import BeautifulSoup
 from importlib.metadata import version, PackageNotFoundError
 
 try:
@@ -25,8 +18,16 @@ except PackageNotFoundError:
 
 from auth import extract_cookies
 import api
-import config
-from sets import get_all_sets, find_set, level_label, DIFF_WEIGHT, DIFF_NAME
+import core
+from core import resolve_slug
+from sets import (
+    get_all_sets,
+    find_set,
+    level_label,
+    resolve_set_problems,
+    set_progress,
+    DIFF_NAME,
+)
 
 app = typer.Typer(help="CLI tool for LeetCode")
 console = Console()
@@ -222,13 +223,18 @@ def version_callback(value: bool):
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
 ):
-    pass
+    """CLI tool for LeetCode. Run with no command to open the TUI."""
+    if ctx.invoked_subcommand is None:
+        from tui import launch_tui
+
+        launch_tui()
 
 
 @app.command()
@@ -285,64 +291,8 @@ def _fetch_problem_index() -> tuple[dict, dict] | None:
     return by_slug, by_id
 
 
-def _resolve_set_problems(problems: list, index: tuple[dict, dict] | None) -> list[dict]:
-    """Merge curated (id, slug, diff) entries with live data when available."""
-    resolved = []
-    for pid, slug, diff in problems:
-        q = None
-        if index:
-            by_slug, by_id = index
-            if slug and slug in by_slug:
-                q = by_slug[slug]
-            elif pid is not None and str(pid) in by_id:
-                q = by_id[str(pid)]
-        if q:
-            resolved.append(
-                {
-                    "id": str(q.get("frontendQuestionId") or pid or "?"),
-                    "slug": q.get("titleSlug") or slug,
-                    "title": q.get("title") or (slug or "").replace("-", " ").title(),
-                    "diff": (q.get("difficulty") or DIFF_NAME.get(diff, "?"))[0],
-                    "status": q.get("status"),
-                    "paid": bool(q.get("paidOnly")),
-                    "ac_rate": q.get("acRate"),
-                }
-            )
-        else:
-            resolved.append(
-                {
-                    "id": str(pid) if pid is not None else "?",
-                    "slug": slug,
-                    "title": (slug or f"#{pid}").replace("-", " ").title(),
-                    "diff": diff or "?",
-                    "status": None,
-                    "paid": False,
-                    "ac_rate": None,
-                }
-            )
-    return resolved
-
-
-def _set_progress(resolved: list[dict]) -> dict:
-    total = len(resolved)
-    solved = sum(1 for p in resolved if p["status"] == "ac")
-    weight_total = sum(DIFF_WEIGHT.get(p["diff"], 2) for p in resolved)
-    weight_solved = sum(
-        DIFF_WEIGHT.get(p["diff"], 2) for p in resolved if p["status"] == "ac"
-    )
-    by_diff = {}
-    for d in ("E", "M", "H"):
-        items = [p for p in resolved if p["diff"] == d]
-        by_diff[d] = (sum(1 for p in items if p["status"] == "ac"), len(items))
-    pct = (100.0 * weight_solved / weight_total) if weight_total else 0.0
-    return {
-        "total": total,
-        "solved": solved,
-        "pct": pct,
-        "by_diff": by_diff,
-        "weight_solved": weight_solved,
-        "weight_total": weight_total,
-    }
+_resolve_set_problems = resolve_set_problems
+_set_progress = set_progress
 
 
 def _progress_bar(pct: float, width: int = 20) -> str:
@@ -638,93 +588,6 @@ def random_problem(
         "[red]Could not find a Python problem after multiple attempts.[/red]")
 
 
-def resolve_slug(slug_or_id: str) -> str:
-    if not slug_or_id.isdigit():
-        return slug_or_id
-
-    data = api.get_questions_list(
-        limit=50, filters={"searchKeywords": slug_or_id})
-    questions = data.get("questions", [])
-    for q in questions:
-        if str(q.get("frontendQuestionId")) == slug_or_id:
-            return q.get("titleSlug")
-
-    return slug_or_id
-
-
-def compare_answers(exp, act, status_msg: str | None = None) -> bool:
-    """Compare expected and actual results logically, considering LeetCode's flexibility."""
-    if status_msg == "Accepted":
-        return True
-
-    if exp == act:
-        return True
-
-    def parse_if_json(s):
-        if not isinstance(s, str):
-            return s
-        s_clean = s.strip()
-        if not s_clean:
-            return s
-        if (s_clean.startswith("[") and s_clean.endswith("]")) or (
-            s_clean.startswith("{") and s_clean.endswith("}")
-        ):
-            try:
-                return json.loads(s_clean)
-            except:
-                return s
-        return s
-
-    exp_obj = parse_if_json(exp)
-    act_obj = parse_if_json(act)
-
-    if exp_obj == act_obj:
-        return True
-
-    # Deep sort for list comparison where order doesn't matter (e.g. 3Sum)
-    if isinstance(exp_obj, list) and isinstance(act_obj, list):
-
-        def deep_sort(obj):
-            if isinstance(obj, list):
-                # Recursively sort items
-                items = [deep_sort(x) for x in obj]
-                try:
-                    # Sort by string representation to handle mixed types or unhashable items
-                    return sorted(items, key=lambda x: str(x))
-                except:
-                    return items
-            return obj
-
-        if deep_sort(exp_obj) == deep_sort(act_obj):
-            return True
-
-    # Fallback: compare strings without whitespace
-    if isinstance(exp, str) and isinstance(act, str):
-        if exp.replace(" ", "") == act.replace(" ", ""):
-            return True
-
-    return False
-
-
-def get_target_file(arg: str) -> str:
-    if os.path.exists(arg) and arg.endswith(".py"):
-        return arg
-
-    cache_dir = config.get_config("cache_dir", str(Path.home() / "leetcode"))
-    if not os.path.exists(cache_dir):
-        return arg
-
-    for fname in os.listdir(cache_dir):
-        if fname.endswith(".py"):
-            match = re.match(r"(\d+)\.(.+)\.py", fname)
-            if match:
-                f_id = match.group(1)
-                f_slug = match.group(2)
-                if arg == f_id or arg == f_slug:
-                    return os.path.join(cache_dir, fname)
-
-    return arg
-
 
 def pager(content: str):
     """Print content directly to the terminal."""
@@ -734,64 +597,13 @@ def pager(content: str):
 
 def _display_question(q: dict):
     """Render question details to terminal."""
-    slug = q.get("titleSlug")
-    html = q.get("content", "")
-    soup = BeautifulSoup(html, "html.parser")
-    images = []
-
-    for img in soup.find_all("img"):
-        url = img.get("src")
-        if url and url.startswith("/"):
-            url = f"https://leetcode.com{url}"
-        token = f"TOKENSPLITIMAGE{len(images)}TOKENSPLIT"
-        images.append(url)
-        img.replace_with(token)
-
-    for tag in soup.find_all("sup"):
-        text = tag.get_text()
-        tag.replace_with(f"^({text})" if len(text) > 1 else f"^{text}")
-    for tag in soup.find_all("sub"):
-        text = tag.get_text()
-        tag.replace_with(f"_({text})" if len(text) > 1 else f"_{text}")
-
-    cleaned_md = md(str(soup))
-    parts = re.split(r"TOKENSPLITIMAGE\d+TOKENSPLIT", cleaned_md)
+    parts, images = core.problem_markdown_parts(q)
 
     output = io.StringIO()
     # Use a temporary console to render into our StringIO
-    temp_console = Console(
-        file=output, force_terminal=True, color_system="truecolor")
+    temp_console = Console(file=output, force_terminal=True, color_system="truecolor")
 
-    status_val = q.get("status")
-    status_mark = ""
-    if status_val == "ac":
-        status_mark = " [green]✔[/green]"
-    elif status_val == "notac":
-        status_mark = " [red]✘[/red]"
-
-    diff_val = q.get("difficulty", "Unknown")
-    diff_color = (
-        "green"
-        if diff_val == "Easy"
-        else "yellow"
-        if diff_val == "Medium"
-        else "red"
-        if diff_val == "Hard"
-        else "white"
-    )
-
-    tags_list = q.get("topicTags") or []
-    tag_names = [t["name"] for t in tags_list if t.get("name")]
-    if tag_names:
-        tags_str = ", ".join(f"[cyan]{tag}[/cyan]" for tag in tag_names)
-        tags_display = f" | Tags: {tags_str}"
-    else:
-        tags_display = ""
-
-    temp_console.print(
-        f"[bold]{q['questionFrontendId']}. {q['title']}{status_mark}[/bold] (Difficulty: [{diff_color}]{diff_val}[/{diff_color}]{tags_display})\n"
-        f"https://leetcode.com/problems/{slug}/\n"
-    )
+    temp_console.print(f"{core.problem_title_markup(q)}\n{core.problem_url(q)}\n")
 
     for i, part in enumerate(parts):
         if part.strip():
@@ -807,8 +619,7 @@ def _display_question(q: dict):
 
                     try:
                         # Use wezterm imgcat for high-quality rendering if possible
-                        res = get_image_rendering(
-                            image_path, prefer_text=False)
+                        res = get_image_rendering(image_path, prefer_text=False)
                         if res:
                             output.write(res)
                             if not res.endswith("\n"):
@@ -859,40 +670,21 @@ def edit(slug: str):
         console.print("[red]Problem not found.[/red]")
         return
 
-    code_snippets = q.get("codeSnippets", [])
-    python_snippet = next(
-        (c for c in code_snippets if c["langSlug"] == "python3"), None
-    )
-
-    if not python_snippet:
+    if not core.python_snippet(q):
         console.print("[red]Python3 snippet not found for this problem.[/red]")
         return
 
-    cache_dir = config.get_config("cache_dir", str(Path.home() / "leetcode"))
-    os.makedirs(cache_dir, exist_ok=True)
-    file_name = os.path.join(cache_dir, f"{q['questionFrontendId']}.{slug}.py")
-
-    should_write = True
+    file_name = core.solution_path(q)
+    overwrite = False
     if os.path.exists(file_name):
-        should_write = typer.confirm(
+        overwrite = typer.confirm(
             f"File {file_name} already exists. Re-initialize and overwrite it?",
             default=False,
         )
 
-    if should_write:
-        header = f'"""{q["questionFrontendId"]}. {q["title"]} (Difficulty: {
-            q["difficulty"]
-        })\n'
-        header += f"https://leetcode.com/problems/{slug}/\n"
-
-        testcases = q.get("exampleTestcases", "")
-        header += f"\n[TESTCASES]\n{testcases}\n"
-        header += '"""\n'
-        header += "from typing import List\n\n\n"
-
-        with open(file_name, "w") as f:
-            f.write(header + python_snippet["code"] + "\n")
-        console.print(f"[green]Created {file_name}![/green]")
+    file_name, created = core.write_solution_file(q, overwrite=overwrite)
+    if created:
+        console.print(f"[green]Created {file_name}[/green] [dim](scratch file, kept until reboot)[/dim]")
     else:
         console.print(f"Opening existing {file_name}...")
 
@@ -904,259 +696,36 @@ def edit(slug: str):
 @app.command("x", hidden=True)
 def exec_cmd(file_path: str):
     """Submit a python file to LeetCode."""
-    import re
-
-    file_path = get_target_file(file_path)
-    if not os.path.exists(file_path):
-        console.print(
-            f"[red]Could not find a valid matching file for '{
-                file_path
-            }' in cache directory.[/red]"
-        )
-        return
-
-    # Extract slug from filename assuming 1.two-sum.py
-    base = os.path.basename(file_path)
-    match = re.match(r"\d+\.(.+)\.py", base)
-    if not match:
-        console.print(
-            "[red]Filename must be in format ID.slug.py (e.g. 1.two-sum.py)[/red]"
-        )
-        return
-    slug = match.group(1)
-
-    q = api.get_question_detail(slug)
-    if not q:
-        console.print(
-            "[red]Could not match local file to a LeetCode problem.[/red]")
-        return
-
-    question_id = q["questionId"]
-
-    with open(file_path, "r") as f:
-        code = f.read()
-
-    console.print("[cyan]Submitting...[/cyan]")
-    try:
-        sub_resp = api.submit_code(slug, question_id, "python3", code)
-        sub_id = sub_resp.get("submission_id")
-        if not sub_id:
-            console.print(f"[red]Submission failed: {sub_resp}[/red]")
-            return
-
-        console.print(f"Submission ID: {sub_id}. Polling for result...")
-
-        while True:
-            time.sleep(2)
-            check = api.check_submission(sub_id)
-            state = check.get("state")
-            if state == "PENDING" or state == "STARTED":
-                console.print(".", end="", style="dim")
-                console.file.flush()
-                continue
-
-            console.print(f"\n[bold]Result: {check.get('status_msg')}[/bold]")
-            if check.get("status_msg") == "Accepted":
-                rt_perc = check.get("runtime_percentile")
-                mem_perc = check.get("memory_percentile")
-                rt_str = check.get("status_runtime", "N/A")
-                mem_str = check.get("status_memory", "N/A")
-
-                if rt_perc is not None:
-                    try:
-                        rt_str += f" (Beats {float(rt_perc):.2f}%)"
-                    except ValueError:
-                        pass
-                if mem_perc is not None:
-                    try:
-                        mem_str += f" (Beats {float(mem_perc):.2f}%)"
-                    except ValueError:
-                        pass
-
-                console.print(f"Runtime: {rt_str} | Memory: {mem_str}")
-            else:
-                if "compile_error" in check:
-                    console.print(f"[red]{check.get('compile_error')}[/red]")
-                if "runtime_error" in check:
-                    console.print(f"[red]{check.get('runtime_error')}[/red]")
-                if "last_testcase" in check and check.get("last_testcase"):
-                    inputs = check.get("last_testcase").replace("\n", ", ")
-                    console.print(f"Input:    {inputs}")
-                if "expected_output" in check:
-                    console.print(f"Expected: {check.get('expected_output')}")
-                    console.print(f"Output:   {check.get('code_output')}")
-                if "std_output" in check and check.get("std_output"):
-                    console.print("Stdout:")
-                    for line in (
-                        check.get("std_output")
-                        .replace("\r", "")
-                        .strip("\n")
-                        .split("\n")
-                    ):
-                        console.print(f"  {line}")
-            break
-
-    except Exception as e:
-        console.print(f"[red]Error submitting: {e}[/red]")
+    core.run_submit(file_path, console)
 
 
 @app.command()
 @app.command("t", hidden=True)
 def test(file_path: str):
     """Run tests for a python file on LeetCode."""
-    import re
+    core.run_test(file_path, console)
 
-    file_path = get_target_file(file_path)
-    if not os.path.exists(file_path):
-        console.print(
-            f"[red]Could not find a valid matching file for '{
-                file_path
-            }' in cache directory.[/red]"
-        )
-        return
 
-    base = os.path.basename(file_path)
-    match = re.match(r"\d+\.(.+)\.py", base)
-    if not match:
-        console.print(
-            "[red]Filename must be in format ID.slug.py (e.g. 1.two-sum.py)[/red]"
-        )
-        return
-    slug = match.group(1)
+@app.command("tui")
+@app.command("ui", hidden=True)
+def tui_cmd():
+    """Open the TUI (main + editor panes; uses tmux when available)."""
+    from tui import launch_tui
 
-    q = api.get_question_detail(slug)
-    if not q:
-        console.print(
-            "[red]Could not match local file to a LeetCode problem.[/red]")
-        return
+    launch_tui()
 
-    question_id = q["questionId"]
 
-    with open(file_path, "r") as f:
-        code = f.read()
+@app.command("_pane", hidden=True)
+def pane_cmd(
+    role: str = typer.Argument(..., help="main"),
+    session_dir: str = typer.Option(..., "--session-dir"),
+    edit_pane: str = typer.Option(None, "--edit-pane"),
+    window: str = typer.Option(None, "--window"),
+):
+    """Internal: run one pane of the tmux TUI layout."""
+    from tui import run_pane
 
-    match_tc = re.search(
-        r"\[TESTCASES\]\n(.*?)\n(?:\"\"\"|''')", code, re.DOTALL)
-    if match_tc:
-        test_cases = match_tc.group(1).strip()
-    else:
-        test_cases = q.get("exampleTestcases", "")
-
-    if not test_cases:
-        console.print(
-            "[yellow]No example testcases found, testing with empty input.[/yellow]"
-        )
-
-    console.print("[cyan]Running tests...[/cyan]")
-    try:
-        try:
-            sub_resp = api.test_code(
-                slug, question_id, "python3", code, test_cases)
-        except Exception as e:
-            console.print(f"[red]Error starting test: {e}[/red]")
-            return
-
-        run_id = sub_resp.get("interpret_id")
-        if not run_id:
-            console.print(
-                f"[red]Test failed (Often due to missing Cookies/Cloudflare if non-JSON, or rate limit): {
-                    sub_resp
-                }[/red]"
-            )
-            return
-
-        console.print(f"Test Run ID: {run_id}. Polling for result...")
-
-        while True:
-            time.sleep(2)
-            try:
-                check = api.check_test_run(run_id)
-            except Exception as e:
-                console.print(f"\n[red]Error polling result: {e}[/red]")
-                break
-
-            state = check.get("state")
-            if state == "PENDING" or state == "STARTED":
-                console.print(".", end="", style="dim")
-                console.file.flush()
-                continue
-
-            console.print(f"\n[bold]Test Result: {
-                          check.get('status_msg')}[/bold]")
-
-            runtime = check.get("status_runtime")
-            if runtime:
-                console.print(f"Runtime: {runtime}")
-
-            if "compile_error" in check and check.get("compile_error"):
-                console.print(f"[red]{check.get('compile_error')}[/red]")
-            elif "runtime_error" in check and check.get("runtime_error"):
-                console.print(f"[red]{check.get('runtime_error')}[/red]")
-            else:
-                expected = check.get("expected_code_answer", [])
-                actual = check.get("code_answer", [])
-                stdout = check.get("std_output_list",
-                                   check.get("code_output", []))
-
-                # LeetCode's backend API returns a trailing empty string due to newline splitting artifacts
-                if isinstance(expected, list) and expected and expected[-1] == "":
-                    expected.pop()
-                if isinstance(actual, list) and actual and actual[-1] == "":
-                    actual.pop()
-                if isinstance(stdout, list) and stdout and stdout[-1] == "":
-                    stdout.pop()
-
-                raw_tc_lines = [
-                    line for line in test_cases.strip("\n").split("\n") if line.strip()
-                ]
-                num_cases = max(
-                    len(expected) if isinstance(expected, list) else 0,
-                    len(actual) if isinstance(actual, list) else 0,
-                )
-
-                if num_cases > 0:
-                    args_per_case = len(raw_tc_lines) // num_cases
-                else:
-                    args_per_case = 1
-
-                for i in range(num_cases):
-                    console.print(f"\n[bold]Test Case {i + 1}:[/bold]")
-
-                    if args_per_case > 0 and i * args_per_case < len(raw_tc_lines):
-                        inputs = raw_tc_lines[
-                            i * args_per_case: (i + 1) * args_per_case
-                        ]
-                        console.print(
-                            f"  Input:    [magenta]{
-                                ', '.join(inputs)}[/magenta]"
-                        )
-
-                    exp = (
-                        expected[i]
-                        if isinstance(expected, list) and i < len(expected)
-                        else "N/A"
-                    )
-                    act = (
-                        actual[i]
-                        if isinstance(actual, list) and i < len(actual)
-                        else "N/A"
-                    )
-
-                    match = compare_answers(exp, act, check.get("status_msg"))
-                    match_col = "green" if match else "red"
-
-                    console.print(f"  Expected: {exp}")
-                    console.print("  Output:   ", end="")
-                    console.print(act, style=match_col)
-
-                    if isinstance(stdout, list) and i < len(stdout) and stdout[i]:
-                        console.print("  Stdout:")
-                        for line in stdout[i].replace("\r", "").strip("\n").split("\n"):
-                            console.print(f"    {line}")
-            break
-
-    except Exception as e:
-        console.print(f"[red]Error starting test: {e}[/red]")
+    run_pane(role, session_dir, edit_pane=edit_pane, window=window)
 
 
 if __name__ == "__main__":

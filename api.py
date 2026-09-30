@@ -60,21 +60,65 @@ def get_questions_list(skip=0, limit=100, filters=None, category_slug=""):
     data = _graphql_request(query, variables)
     return data.get("data", {}).get("problemsetQuestionList", {})
 
-def get_all_questions(page_size=1000):
-    """Fetch every problem (id, slug, title, difficulty, status, paidOnly) in pages."""
-    questions = []
-    skip = 0
-    total = None
-    while total is None or skip < total:
-        data = get_questions_list(skip=skip, limit=page_size)
-        page = data.get("questions", [])
-        if total is None:
-            total = data.get("total", 0)
-        if not page:
-            break
-        questions.extend(page)
-        skip += len(page)
+V2_STATUS = {"SOLVED": "ac", "ATTEMPTED": "notac"}
+
+
+def _normalize_v2(q: dict) -> dict:
+    """Shape a problemsetQuestionListV2 node like the v1 questionList nodes."""
+    return {
+        "frontendQuestionId": q.get("questionFrontendId"),
+        "titleSlug": q.get("titleSlug"),
+        "title": q.get("title"),
+        "difficulty": (q.get("difficulty") or "").capitalize(),
+        "status": V2_STATUS.get(q.get("status")),
+        "paidOnly": bool(q.get("paidOnly")),
+        "acRate": (q.get("acRate") or 0.0) * 100.0,
+        "frequency": q.get("frequency"),
+        "topicTags": q.get("topicTags") or [],
+    }
+
+
+def get_all_questions(page_size=100, workers=8):
+    """Fetch every problem (id, slug, title, difficulty, status, paidOnly, frequency).
+
+    Uses problemsetQuestionListV2, which also reports each problem's interview
+    frequency score.  Pages are capped at 100 items and fetched concurrently.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    query = """
+    query problemsetQuestionListV2($limit: Int, $skip: Int) {
+      problemsetQuestionListV2(limit: $limit, skip: $skip) {
+        totalLength
+        questions {
+          questionFrontendId
+          titleSlug
+          title
+          difficulty
+          status
+          paidOnly
+          acRate
+          frequency
+          topicTags { name slug }
+        }
+      }
+    }
+    """
+
+    def page(skip):
+        data = _graphql_request(query, {"limit": page_size, "skip": skip})
+        res = data.get("data", {}).get("problemsetQuestionListV2") or {}
+        return res.get("totalLength", 0) or 0, [_normalize_v2(q) for q in res.get("questions", [])]
+
+    total, questions = page(0)
+    if not questions or len(questions) >= total:
+        return questions
+    page_size = len(questions)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _, chunk in pool.map(page, range(page_size, total, page_size)):
+            questions.extend(chunk)
     return questions
+
 
 def get_question_detail(title_slug: str):
     query = """

@@ -969,6 +969,69 @@ def find_set(name: str, sets: dict[str, dict] | None = None) -> tuple[str, dict]
     return None
 
 
+def resolve_set_problems(problems: list, index: tuple[dict, dict] | None) -> list[dict]:
+    """Merge curated (id, slug, diff) entries with live data when available."""
+    resolved = []
+    for pid, slug, diff in problems:
+        q = None
+        if index:
+            by_slug, by_id = index
+            if slug and slug in by_slug:
+                q = by_slug[slug]
+            elif pid is not None and str(pid) in by_id:
+                q = by_id[str(pid)]
+        if q:
+            resolved.append(
+                {
+                    "id": str(q.get("frontendQuestionId") or pid or "?"),
+                    "slug": q.get("titleSlug") or slug,
+                    "title": q.get("title") or (slug or "").replace("-", " ").title(),
+                    "diff": (q.get("difficulty") or DIFF_NAME.get(diff, "?"))[0],
+                    "status": q.get("status"),
+                    "paid": bool(q.get("paidOnly")),
+                    "ac_rate": q.get("acRate"),
+                    "freq": q.get("frequency"),
+                }
+            )
+        else:
+            resolved.append(
+                {
+                    "id": str(pid) if pid is not None else "?",
+                    "slug": slug,
+                    "title": (slug or f"#{pid}").replace("-", " ").title(),
+                    "diff": diff or "?",
+                    "status": None,
+                    "paid": False,
+                    "ac_rate": None,
+                    "freq": None,
+                }
+            )
+    return resolved
+
+
+def set_progress(resolved: list[dict]) -> dict:
+    total = len(resolved)
+    solved = sum(1 for p in resolved if p["status"] == "ac")
+    weight_total = sum(DIFF_WEIGHT.get(p["diff"], 2) for p in resolved)
+    weight_solved = sum(
+        DIFF_WEIGHT.get(p["diff"], 2) for p in resolved if p["status"] == "ac"
+    )
+    by_diff = {}
+    for d in ("E", "M", "H"):
+        items = [p for p in resolved if p["diff"] == d]
+        by_diff[d] = (sum(1 for p in items if p["status"] == "ac"), len(items))
+    pct = (100.0 * weight_solved / weight_total) if weight_total else 0.0
+    return {
+        "total": total,
+        "solved": solved,
+        "pct": pct,
+        "by_diff": by_diff,
+        "weight_solved": weight_solved,
+        "weight_total": weight_total,
+    }
+
+
+
 def level_label(pct: float) -> tuple[str, str]:
     """Map a 0-100 percentage to (label, rich color)."""
     if pct >= 100:
