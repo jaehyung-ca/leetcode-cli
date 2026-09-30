@@ -22,4 +22,4 @@ dependencies = [
 lc = "main:app"
 
 [tool.setuptools]
-py-modules = ["main", "api", "auth", "config"]
+py-modules = ["main", "api", "auth", "config", "sets"]

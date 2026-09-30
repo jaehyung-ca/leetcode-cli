@@ -38,6 +38,7 @@ def get_questions_list(skip=0, limit=100, filters=None, category_slug=""):
           acRate
           difficulty
           frontendQuestionId: questionFrontendId
+          paidOnly: isPaidOnly
           status
           title
           titleSlug
@@ -58,6 +59,22 @@ def get_questions_list(skip=0, limit=100, filters=None, category_slug=""):
     }
     data = _graphql_request(query, variables)
     return data.get("data", {}).get("problemsetQuestionList", {})
+
+def get_all_questions(page_size=1000):
+    """Fetch every problem (id, slug, title, difficulty, status, paidOnly) in pages."""
+    questions = []
+    skip = 0
+    total = None
+    while total is None or skip < total:
+        data = get_questions_list(skip=skip, limit=page_size)
+        page = data.get("questions", [])
+        if total is None:
+            total = data.get("total", 0)
+        if not page:
+            break
+        questions.extend(page)
+        skip += len(page)
+    return questions
 
 def get_question_detail(title_slug: str):
     query = """

@@ -26,6 +26,7 @@ except PackageNotFoundError:
 from auth import extract_cookies
 import api
 import config
+from sets import get_all_sets, find_set, level_label, DIFF_WEIGHT, DIFF_NAME
 
 app = typer.Typer(help="CLI tool for LeetCode")
 console = Console()
@@ -258,6 +259,254 @@ def tags():
     for t in tags_data:
         table.add_row(t.get("name"), t.get("slug"))
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Problem sets
+# ---------------------------------------------------------------------------
+
+
+def _fetch_problem_index() -> tuple[dict, dict] | None:
+    """Return (by_slug, by_id) maps of every LeetCode problem, or None if offline."""
+    try:
+        questions = api.get_all_questions()
+    except Exception as e:
+        console.print(
+            f"[yellow]Could not fetch problem status from LeetCode ({e}). "
+            "Showing offline data.[/yellow]"
+        )
+        return None
+    by_slug = {q["titleSlug"]: q for q in questions if q.get("titleSlug")}
+    by_id = {
+        str(q["frontendQuestionId"]): q
+        for q in questions
+        if q.get("frontendQuestionId")
+    }
+    return by_slug, by_id
+
+
+def _resolve_set_problems(problems: list, index: tuple[dict, dict] | None) -> list[dict]:
+    """Merge curated (id, slug, diff) entries with live data when available."""
+    resolved = []
+    for pid, slug, diff in problems:
+        q = None
+        if index:
+            by_slug, by_id = index
+            if slug and slug in by_slug:
+                q = by_slug[slug]
+            elif pid is not None and str(pid) in by_id:
+                q = by_id[str(pid)]
+        if q:
+            resolved.append(
+                {
+                    "id": str(q.get("frontendQuestionId") or pid or "?"),
+                    "slug": q.get("titleSlug") or slug,
+                    "title": q.get("title") or (slug or "").replace("-", " ").title(),
+                    "diff": (q.get("difficulty") or DIFF_NAME.get(diff, "?"))[0],
+                    "status": q.get("status"),
+                    "paid": bool(q.get("paidOnly")),
+                    "ac_rate": q.get("acRate"),
+                }
+            )
+        else:
+            resolved.append(
+                {
+                    "id": str(pid) if pid is not None else "?",
+                    "slug": slug,
+                    "title": (slug or f"#{pid}").replace("-", " ").title(),
+                    "diff": diff or "?",
+                    "status": None,
+                    "paid": False,
+                    "ac_rate": None,
+                }
+            )
+    return resolved
+
+
+def _set_progress(resolved: list[dict]) -> dict:
+    total = len(resolved)
+    solved = sum(1 for p in resolved if p["status"] == "ac")
+    weight_total = sum(DIFF_WEIGHT.get(p["diff"], 2) for p in resolved)
+    weight_solved = sum(
+        DIFF_WEIGHT.get(p["diff"], 2) for p in resolved if p["status"] == "ac"
+    )
+    by_diff = {}
+    for d in ("E", "M", "H"):
+        items = [p for p in resolved if p["diff"] == d]
+        by_diff[d] = (sum(1 for p in items if p["status"] == "ac"), len(items))
+    pct = (100.0 * weight_solved / weight_total) if weight_total else 0.0
+    return {
+        "total": total,
+        "solved": solved,
+        "pct": pct,
+        "by_diff": by_diff,
+        "weight_solved": weight_solved,
+        "weight_total": weight_total,
+    }
+
+
+def _progress_bar(pct: float, width: int = 20) -> str:
+    filled = int(round(width * pct / 100.0))
+    _, color = level_label(pct)
+    return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (width - filled)}[/dim]"
+
+
+def _diff_markup(diff: str) -> str:
+    name = DIFF_NAME.get(diff, diff)
+    color = {"E": "green", "M": "yellow", "H": "red"}.get(diff, "white")
+    return f"[{color}]{name}[/{color}]"
+
+
+@app.command("sets")
+@app.command("ss", hidden=True)
+def list_sets(
+    offline: bool = typer.Option(
+        False, "--offline", help="Do not contact LeetCode; skip solved status"
+    ),
+):
+    """List problem sets by skill/topic with your progress in each."""
+    all_sets = get_all_sets()
+    index = None if offline else _fetch_problem_index()
+
+    table = Table(title="Problem Sets")
+    table.add_column("Set", style="cyan", no_wrap=True)
+    table.add_column("Description", overflow="ellipsis", max_width=44)
+    table.add_column("Solved", justify="right", no_wrap=True, min_width=6)
+    table.add_column("E/M/H", justify="center", style="dim", no_wrap=True, min_width=13)
+    table.add_column("Progress", no_wrap=True, min_width=25)
+    table.add_column("Level", no_wrap=True, min_width=9)
+
+    for name, body in all_sets.items():
+        resolved = _resolve_set_problems(body["problems"], index)
+        prog = _set_progress(resolved)
+        bd = prog["by_diff"]
+        label, color = level_label(prog["pct"])
+        emh = "/".join(f"{bd[d][0]}:{bd[d][1]}" for d in ("E", "M", "H"))
+        display_name = f"{name} [dim](user)[/dim]" if body.get("user") else name
+        table.add_row(
+            display_name,
+            body["description"],
+            f"{prog['solved']}/{prog['total']}",
+            emh,
+            f"{_progress_bar(prog['pct'])} {prog['pct']:3.0f}%",
+            f"[{color}]{label}[/{color}]" if index else "[dim]-[/dim]",
+        )
+    console.print(table)
+    console.print(
+        "[dim]Progress is weighted: Easy=1, Medium=2, Hard=3. "
+        "E/M/H shows solved:total per difficulty. "
+        "Use `lc set <name>` to see the problems.[/dim]"
+    )
+
+
+@app.command("set")
+@app.command("s", hidden=True)
+def show_set(
+    name: str = typer.Argument(..., help="Set name (prefix is fine, e.g. 'dp')"),
+    unsolved: bool = typer.Option(
+        False, "-u", "--unsolved", help="Only show problems you have not solved"
+    ),
+    diff: str = typer.Option(
+        None, "-d", "--diff", help="Filter by difficulty: easy, medium, hard"
+    ),
+    random_pick: bool = typer.Option(
+        False, "-r", "--random", help="Open a random unsolved problem from the set"
+    ),
+    next_pick: bool = typer.Option(
+        False, "-n", "--next", help="Open the first unsolved problem from the set"
+    ),
+    offline: bool = typer.Option(
+        False, "--offline", help="Do not contact LeetCode; skip solved status"
+    ),
+):
+    """Show the problems in a set, with solved status and progress."""
+    all_sets = get_all_sets()
+    found = find_set(name, all_sets)
+    if not found:
+        key = name.strip().lower()
+        candidates = [k for k in all_sets if key in k]
+        if candidates:
+            console.print(
+                f"[red]'{name}' is ambiguous.[/red] Did you mean: "
+                + ", ".join(f"[cyan]{c}[/cyan]" for c in candidates)
+            )
+        else:
+            console.print(f"[red]No set named '{name}'.[/red] Available sets:")
+            console.print("  " + ", ".join(all_sets.keys()))
+        return
+    set_name, body = found
+
+    index = None if offline else _fetch_problem_index()
+    resolved = _resolve_set_problems(body["problems"], index)
+    prog = _set_progress(resolved)
+
+    rows = resolved
+    if diff:
+        d = diff.strip().lower()[:1].upper()
+        rows = [p for p in rows if p["diff"] == d]
+    if unsolved or random_pick or next_pick:
+        rows = [p for p in rows if p["status"] != "ac"]
+
+    if random_pick or next_pick:
+        candidates = [p for p in rows if p["slug"] and not p["paid"]]
+        if not candidates:
+            console.print("[green]Nothing left to solve here. Nice![/green]")
+            return
+        if random_pick:
+            import random as rand
+
+            chosen = rand.choice(candidates)
+        else:
+            chosen = candidates[0]
+        console.print(
+            f"[dim]{set_name}: picked [cyan]{chosen['slug']}[/cyan] "
+            f"({len(candidates)} unsolved remaining)[/dim]\n"
+        )
+        q = api.get_question_detail(chosen["slug"])
+        if not q:
+            console.print("[red]Problem not found.[/red]")
+            return
+        _display_question(q)
+        return
+
+    label, color = level_label(prog["pct"])
+    bd = prog["by_diff"]
+    header = f"{set_name} — {body['description']}"
+    table = Table(title=header)
+    table.add_column("Status", justify="center")
+    table.add_column("ID", style="dim", justify="right")
+    table.add_column("Title")
+    table.add_column("Difficulty")
+    table.add_column("Slug", style="magenta")
+
+    for p in rows:
+        if p["status"] == "ac":
+            mark = "[green]✔[/green]"
+        elif p["status"] == "notac":
+            mark = "[red]✘[/red]"
+        else:
+            mark = ""
+        title = p["title"]
+        if p["paid"]:
+            title += " [yellow]🔒[/yellow]"
+        table.add_row(mark, p["id"], title, _diff_markup(p["diff"]), p["slug"] or "")
+    console.print(table)
+
+    if index:
+        console.print(
+            f"Solved [bold]{prog['solved']}/{prog['total']}[/bold]  "
+            f"(E {bd['E'][0]}/{bd['E'][1]}, M {bd['M'][0]}/{bd['M'][1]}, "
+            f"H {bd['H'][0]}/{bd['H'][1]})  "
+            f"{_progress_bar(prog['pct'])} {prog['pct']:.0f}%  "
+            f"[{color}]{label}[/{color}]"
+        )
+    else:
+        console.print(f"[dim]{prog['total']} problems (offline, no status)[/dim]")
+    if unsolved and not rows:
+        if diff:
+            console.print(f"[green]No unsolved {diff.lower()} problems left in this set.[/green]")
+        else:
+            console.print("[green]Everything in this set is solved.[/green]")
 
 
 @app.command("list")
