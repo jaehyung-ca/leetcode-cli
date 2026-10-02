@@ -706,6 +706,145 @@ def test(file_path: str):
     core.run_test(file_path, console)
 
 
+def _lists_path() -> Path:
+    import lists
+
+    return core.data_dir() / lists.LISTS
+
+
+def _problem_info(problem: str | None) -> dict | None:
+    """{"slug", "id", "title", "status"} for an ID/slug, or the most recently opened problem."""
+    import json
+    import sync
+
+    if not problem:
+        recent = sync.read_recent(core.data_dir() / sync.RECENT)
+        if not recent:
+            console.print("[red]No recently opened problem; name one (ID or slug).[/red]")
+            return None
+        problem = recent[0]["slug"]
+    try:
+        index = json.loads((core.data_dir() / "index.json").read_text())
+    except Exception:
+        index = []
+    for q in index:
+        if problem in (q.get("titleSlug"), str(q.get("frontendQuestionId"))):
+            return {
+                "slug": q["titleSlug"], "id": str(q.get("frontendQuestionId") or ""),
+                "title": q.get("title") or "", "status": q.get("status"),
+            }
+    q = api.get_question_detail(resolve_slug(problem))
+    if not q:
+        console.print(f"[red]Problem not found: {problem}[/red]")
+        return None
+    return {
+        "slug": q["titleSlug"], "id": q.get("questionFrontendId") or "",
+        "title": q.get("title") or "", "status": q.get("status"),
+    }
+
+
+@app.command("save")
+@app.command("sv", hidden=True)
+def save_cmd(
+    list_name: str = typer.Argument(..., metavar="LIST", help="List to save to (created if new)"),
+    problem: str = typer.Argument(None, help="Problem ID or slug (default: the one you opened last)"),
+    note: str = typer.Option(None, "-m", "--note", help="Note to keep with the problem"),
+):
+    """Save a problem to one of your lists, with a note."""
+    import lists
+
+    info = _problem_info(problem)
+    if not info:
+        raise typer.Exit(1)
+    path = _lists_path()
+    data = lists.read_lists(path)
+    name = list_name.strip()
+    existing = next((n for n in data if n.lower() == name.lower()), None)
+    name = existing or name
+    if note is None:  # keep the note it already has in this list
+        old = data.get(name, {}).get(info["slug"], {})
+        note = "" if old.get("removed") else old.get("note", "")
+    added = lists.save(path, name, info["slug"], note, info["id"], info["title"])
+    label = f"{info['id']}. {info['title']}" if info["id"] else info["slug"]
+    verb = "Saved" if added else "Updated"
+    console.print(f"[green]{verb}[/green] {label} in [bold]{name}[/bold]" + (f": {note}" if note else ""))
+
+
+@app.command("unsave")
+def unsave_cmd(
+    list_name: str = typer.Argument(..., metavar="LIST", help="List name (unique prefix is fine)"),
+    problem: str = typer.Argument(None, help="Problem ID or slug (default: the one you opened last)"),
+):
+    """Remove a problem from one of your lists."""
+    import lists
+
+    path = _lists_path()
+    name = lists.find_list(lists.read_lists(path), list_name)
+    if not name:
+        console.print(f"[red]No list named '{list_name}'.[/red]")
+        raise typer.Exit(1)
+    info = _problem_info(problem)
+    if not info:
+        raise typer.Exit(1)
+    if lists.remove(path, name, info["slug"]):
+        console.print(f"Removed {info['slug']} from [bold]{name}[/bold].")
+    else:
+        console.print(f"[yellow]{info['slug']} is not in {name}.[/yellow]")
+
+
+@app.command("lists")
+@app.command("ls", hidden=True)
+def lists_cmd(
+    list_name: str = typer.Argument(None, metavar="[LIST]", help="Show one list's problems and notes"),
+):
+    """Show your lists, or the problems and notes in one list."""
+    import json
+    import lists
+
+    data = lists.read_lists(_lists_path())
+    live = lists.live_lists(data)
+    try:
+        index = {q["titleSlug"]: q for q in json.loads((core.data_dir() / "index.json").read_text())}
+    except Exception:
+        index = {}
+
+    if not list_name:
+        if not live:
+            console.print("[dim]No lists yet. Save a problem with `lc save <list> \\[problem] -m <note>`.[/dim]")
+            return
+        table = Table(title="Your Lists")
+        table.add_column("List", style="cyan", no_wrap=True)
+        table.add_column("Problems", justify="right")
+        table.add_column("Solved", justify="right")
+        for name, items in live.items():
+            solved = sum(1 for e in items if index.get(e["slug"], {}).get("status") == "ac")
+            table.add_row(name, str(len(items)), str(solved) if index else "-")
+        console.print(table)
+        return
+
+    name = lists.find_list(data, list_name)
+    if not name:
+        console.print(f"[red]No list named '{list_name}'.[/red] Lists: " + ", ".join(live))
+        raise typer.Exit(1)
+    table = Table(title=name)
+    table.add_column("Status", justify="center")
+    table.add_column("ID", style="dim", justify="right")
+    table.add_column("Title")
+    table.add_column("Difficulty")
+    table.add_column("Note")
+    for e in live[name]:
+        q = index.get(e["slug"], {})
+        status = q.get("status")
+        mark = "[green]✔[/green]" if status == "ac" else "[red]✘[/red]" if status == "notac" else ""
+        diff = (q.get("difficulty") or "?")[0]
+        table.add_row(
+            mark, str(q.get("frontendQuestionId") or e.get("id") or ""),
+            q.get("title") or e.get("title") or e["slug"],
+            _diff_markup(diff) if q else "", e.get("note", ""),
+        )
+    console.print(table)
+
+
 @app.command("tui")
 @app.command("ui", hidden=True)
 def tui_cmd():
@@ -717,7 +856,7 @@ def tui_cmd():
 
 @app.command("sync-setup")
 def sync_setup():
-    """Configure syncing the recent list through Google Drive (rclone)."""
+    """Configure syncing the recent list and lists through Google Drive (rclone)."""
     import sync
 
     sync.setup_drive(core.data_dir(), console)

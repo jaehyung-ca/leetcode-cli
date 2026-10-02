@@ -8,6 +8,7 @@ A feature-rich command-line interface for LeetCode. Browse, edit, test, and subm
 - **Authentication**: Automatically extracts LeetCode session cookies from your local browser (`lc auth`).
 - **Problem Browsing**: List problems with filters for tags, difficulty, and search keywords (`lc list`, `lc tags`).
 - **Problem Details**: View problem descriptions directly in the terminal, rendered in markdown (`lc pick`).
+- **Your Lists**: Save the problem you are working on to your own lists, each with a note, from the TUI (`a`) or the CLI (`lc save`, `lc lists`); lists sync across machines with the recent list.
 - **Skill Sets**: Curated problem sets per topic (arrays, DP, graphs, ...) plus Blind 75 and a big-tech frequency list, with your solved progress and a level per set (`lc sets`, `lc set`).
 - **Code Editor**: Generate starter code and open it in your `$EDITOR` (`lc edit`).
 - **Testing & Submission**: Run example test cases (`lc test`) and submit solutions to LeetCode (`lc exec`).
@@ -42,6 +43,9 @@ After installation, the `lc` command will be available in your terminal.
 | `lc random` | `lc r` | View a randomly selected problem | `lc r -d hard` |
 | `lc sets` | `lc ss` | List curated skill sets with your progress | `lc ss` |
 | `lc set` | `lc s` | Show one set's problems, or pick the next unsolved one | `lc s dp-1d -u`, `lc s graphs -r` |
+| `lc save` | `lc sv` | Save a problem to one of your lists with a note | `lc save redo 146 -m "use OrderedDict"` |
+| `lc unsave` | | Remove a problem from a list | `lc unsave redo 146` |
+| `lc lists` | `lc ls` | Show your lists, or one list with its notes | `lc ls redo` |
 | `lc edit` | `lc e` | Generate starter code and open in editor | `lc e 1` |
 | `lc test` | `lc t` | Run example test cases on local file | `lc t 1` |
 | `lc exec` | `lc x` | Submit a local file's solution to LeetCode | `lc x 1.two-sum.py` |
@@ -69,6 +73,7 @@ The **main** pane starts on a menu; pick a section by its first letter:
 | `r` | recent  | Problems you opened most recently |
 | `p` | passed  | Accepted problems |
 | `f` | failed  | Attempted but not accepted |
+| `m` | my lists | Your lists of saved problems, with notes |
 
 Navigation is vi-style: `j`/`k` move, `l` (or `Enter`) opens, `h` goes back. Problem lists show LeetCode's interview-frequency score in the last column; `f` sorts by it. Opening a problem shows its description in the main pane, writes the starter file if it does not exist yet, and loads it in the **edit** pane; `l` on the problem view jumps to the editor. `t` and `x` save the editor, run the tests or submit, and print the result in the log at the bottom. An accepted submission marks the problem ✔ immediately.
 
@@ -83,10 +88,12 @@ Navigation is vi-style: `j`/`k` move, `l` (or `Enter`) opens, `h` goes back. Pro
 | `r` / `n` | Open a random / the first unsolved problem in the current list (or the highlighted set) |
 | `t` / `x` | Test / submit the open problem |
 | `e` / `o` | Re-open the solution in the editor / open the problem on leetcode.com |
+| `a` | Save the problem (on screen, highlighted, or open) to a list with a note |
+| `D` | In a list: remove the highlighted problem from it |
 | `Ctrl-d` / `Ctrl-u`, `g` / `G` | Page / jump in the problem description |
 | `Ctrl-r` / `Ctrl-l` | Refresh the problem list / clear the log |
 | `?` | Help |
-| `q` | Save, sync the recent list (Drive or git), quit |
+| `q` | Save, sync the recent list and lists (Drive or git), quit |
 
 The edit pane runs `$EDITOR` in the scratch work directory. With `nvim` it is started with `--listen`, so the main pane switches files over RPC (and saves before test/submit). `vi`/`vim` are driven with tmux `send-keys`; any other editor is restarted with the new file.
 
@@ -95,11 +102,11 @@ Without tmux, `lc` runs as a single window and `e` suspends the TUI to run `$EDI
 #### Solution files, state and sync
 Solution files are scratch files. They are written to `$TMPDIR/lc-work/` (`/tmp/lc-work/`), recreated from the LeetCode snippet when missing, kept until the machine reboots, and never recorded anywhere else. Override the directory with `LC_WORK_DIR`.
 
-The tool's own state lives in the data directory (default `~/.config/leetcode-cli`, see Configuration): the recently opened problems (`recent.json`) and the full problem list with your solved status (`index.json`, refreshed in the background so the TUI starts instantly).
+The tool's own state lives in the data directory (default `~/.config/leetcode-cli`, see Configuration): the recently opened problems (`recent.json`), your lists with notes (`lists.json`) and the full problem list with your solved status (`index.json`, refreshed in the background so the TUI starts instantly).
 
-Only the recent list needs to follow you across machines (solved/failed status comes from your LeetCode account), and it can be synced two ways:
+Only the recent list and your lists need to follow you across machines (solved/failed status comes from your LeetCode account), and they can be synced two ways:
 
-- **Google Drive** (via [rclone](https://rclone.org)): set `drive_folder_id` to the ID from the folder's share link and `rclone_remote` to an rclone remote of type `drive` that can write to that folder (`rclone config` to create one). On startup the remote list is merged into the local one (union by problem, latest timestamp wins); on `q` the merged list is uploaded.
+- **Google Drive** (via [rclone](https://rclone.org)): set `drive_folder_id` to the ID from the folder's share link and `rclone_remote` to an rclone remote of type `drive` that can write to that folder (`rclone config` to create one). On startup the remote files are merged into the local ones (union by problem, latest timestamp wins; removing a problem from a list leaves a marker so the removal syncs too); on `q` the merged files are uploaded.
 - **git**: if no Drive folder is configured and the data directory is a git repository (`index.json` is git-ignored automatically), `q` commits its changes (`lc sync <date> (<n> files)`) and pushes when a remote is configured.
 
 On the first `lc` launch with no sync configured (and rclone with a `drive` remote available), the tool asks whether to set up Drive sync: pick the remote, then paste the folder's share link or ID, or press Enter to use (or create) a `leetcode-cli` folder at the remote's root. The settings are written to `config.json`; answering no stores `"data_sync": "none"`. Run `lc sync-setup` to configure it again.
@@ -176,6 +183,20 @@ Add your own sets in `~/.config/leetcode-cli/sets.json`. Entries can be slugs or
 }
 ```
 
+### Your Lists
+Keep your own lists of problems (to redo, tricky ones, interview prep, ...), each problem with a note. In the TUI press `a` on a problem: type a list name (existing names complete with `→`; a new name creates the list), Enter, then the note, Enter. Saving a problem that is already in the list updates its note. The lists show under `m` (my lists); the problem view shows which lists the problem is in and their notes.
+
+From the command line the problem defaults to the one you opened last:
+
+```bash
+lc save redo -m "use OrderedDict + move_to_end"   # last opened problem
+lc save tricky 42 -m "two pointers, not a stack"
+lc lists                                           # every list with counts
+lc lists redo                                      # problems and notes (prefix is fine)
+lc unsave redo 146
+# Aliases: lc sv, lc ls
+```
+
 ### Edit Solution
 Generates starter Python boilerplate and opens your default editor (e.g., `vi`). The file is a scratch file in `/tmp/lc-work/` (kept until reboot), so `lc test 1` / `lc exec 1` find it by ID afterwards.
 ```bash
@@ -215,7 +236,7 @@ You can customize `leetcode-cli` by editing the configuration file located at `~
 `tui_main_width` is the width of the main pane. `drive_folder_id`, `rclone_remote` and `data_sync` configure the recent-list sync (see above). `tui_theme` is any Textual built-in theme (default `solarized-light`; others include `solarized-dark`, `gruvbox`, `nord`, `dracula`, `catppuccin-latte`, `textual-dark`). Set `tui_tmux` to `false` to always use the single-window mode.
 
 ### Data Directory
-The tool's state (`recent.json`, `index.json`) lives in `~/.config/leetcode-cli` by default. Change it with `data_dir` in `config.json`, or for one run with the `LC_DATA_DIR` environment variable:
+The tool's state (`recent.json`, `lists.json`, `index.json`) lives in `~/.config/leetcode-cli` by default. Change it with `data_dir` in `config.json`, or for one run with the `LC_DATA_DIR` environment variable:
 
 ```json
 {
@@ -227,7 +248,7 @@ The tool's state (`recent.json`, `index.json`) lives in `~/.config/leetcode-cli`
 - `typer`: For CLI parsing
 - `rich`: For beautiful terminal output
 - `textual`: For the TUI panes
-- `rclone` (optional, external): For syncing the recent list through Google Drive
+- `rclone` (optional, external): For syncing the recent list and lists through Google Drive
 - `requests` & `curl-cffi`: For HTTP requests and avoiding Cloudflare checks
 - `browser-cookie3`: For seamless browser authentication 
 - `beautifulsoup4` & `markdownify`: For HTML parsing and markdown rendering

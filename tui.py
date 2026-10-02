@@ -17,8 +17,9 @@ app runs alone and ``e`` suspends it to run ``$EDITOR``.
 
 Solution files are scratch files in ``core.work_dir()`` (under the system temp
 directory, so they last until reboot).  The tool's own state (problem index,
-recently opened problems) lives in ``core.data_dir()`` (``~/leetcode``); the
-recent list is synced through Google Drive or git on startup/quit (see sync.py).
+recently opened problems, your lists with notes) lives in ``core.data_dir()``;
+the recent list and lists are synced through Google Drive or git on
+startup/quit (see sync.py).
 """
 
 from __future__ import annotations
@@ -43,11 +44,14 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.suggester import SuggestFromList
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
 import api
 import config
 import core
+import lists
 import sync
 from sets import DIFF_NAME, get_all_sets, level_label, resolve_set_problems, set_progress
 
@@ -63,8 +67,9 @@ MENU = [
     ("recent", "r", "recent", "Recently opened problems"),
     ("passed", "p", "passed", "Accepted problems"),
     ("failed", "f", "failed", "Attempted but not accepted"),
+    ("lists", "m", "my lists", "Problems you saved, with notes"),
 ]
-PROBLEM_LISTS = {"set", "tag", "search", "recent", "passed", "failed"}
+PROBLEM_LISTS = {"set", "tag", "search", "recent", "passed", "failed", "list"}
 
 
 def tui_theme() -> str:
@@ -356,6 +361,7 @@ class ProblemView(Vertical):
     ProblemView { height: 1fr; }
     ProblemView #ptitle { height: auto; padding: 0 1; background: $panel; }
     ProblemView #purl { height: 1; padding: 0 1; color: $text-muted; }
+    ProblemView #pnotes { height: auto; padding: 0 1; }
     ProblemView VerticalScroll { height: 1fr; }
     ProblemView #pbody { padding: 1 1; }
     """
@@ -363,6 +369,7 @@ class ProblemView(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(Text("No problem selected."), id="ptitle")
         yield Static("", id="purl")
+        yield Static("", id="pnotes", classes="hidden")
         with VerticalScroll(id="pscroll"):
             yield Static("", id="pbody")
 
@@ -384,7 +391,8 @@ class ProblemView(Vertical):
             )
         )
 
-    def show(self, q: dict) -> None:
+    def show(self, q: dict, notes: list[tuple[str, str]]) -> None:
+        self.set_notes(notes)
         self.query_one("#ptitle", Static).update(Text.from_markup(core.problem_title_markup(q)))
         self.query_one("#purl", Static).update(core.problem_url(q))
         self.query_one("#pbody", Static).update(
@@ -392,7 +400,21 @@ class ProblemView(Vertical):
         )
         self.query_one("#pscroll", VerticalScroll).scroll_home(animate=False)
 
+    def set_notes(self, notes: list[tuple[str, str]]) -> None:
+        """One line per list the problem is saved in: ``▸ list  note``."""
+        line = Text()
+        for i, (name, note) in enumerate(notes):
+            if i:
+                line.append("\n")
+            line.append(f"▸ {name}", style="bold")
+            if note:
+                line.append(f"  {note}")
+        widget = self.query_one("#pnotes", Static)
+        widget.update(line)
+        widget.set_class(not notes, "hidden")
+
     def loading(self, label: str) -> None:
+        self.set_notes([])
         self.query_one("#ptitle", Static).update(Text(label, style="bold"))
         self.query_one("#purl", Static).update("")
         self.query_one("#pbody", Static).update(Text("Fetching…", style="dim"))
@@ -432,12 +454,82 @@ class LogWriter:
             self.buf = ""
 
 
+class SaveScreen(ModalScreen):
+    """Ask for a list name and a note; dismisses with (name, note) or None."""
+
+    DEFAULT_CSS = """
+    SaveScreen { align: center middle; }
+    SaveScreen #dialog {
+        width: 80%; max-width: 90; height: auto; padding: 1 2;
+        border: round $primary; background: $surface;
+    }
+    SaveScreen Input { margin-top: 1; }
+    SaveScreen .dim { color: $text-muted; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, label: str, names: list[str], notes: dict[str, str], default: str):
+        super().__init__()
+        self.label = label
+        self.names = names
+        self.notes = notes  # list name -> note, for the lists this problem is in
+        self.default = default
+        self._filled = ""  # note text we pre-filled (replaced when the list changes)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static(Text(f"Save {self.label} to a list", style="bold"))
+            if self.names:
+                known = ", ".join(f"{n} ✓" if n in self.notes else n for n in self.names)
+                yield Static(Text(f"Lists: {known}"), classes="dim")
+            yield Input(
+                value=self.default, placeholder="list name (new or existing; → completes)",
+                id="name", suggester=SuggestFromList(self.names, case_sensitive=False),
+            )
+            yield Input(placeholder="note (optional)", id="note")
+            yield Static("Enter: next / save · Esc: cancel", classes="dim")
+
+    def on_mount(self) -> None:
+        self._fill_note(self.default)
+        self.query_one("#name" if not self.default else "#note", Input).focus()
+
+    def _known(self, name: str) -> str | None:
+        key = name.strip().lower()
+        return next((n for n in self.names if n.lower() == key), None)
+
+    def _fill_note(self, name: str) -> None:
+        note = self.query_one("#note", Input)
+        if note.value != self._filled:
+            return  # the user typed something; keep it
+        self._filled = self.notes.get(self._known(name) or "", "")
+        note.value = self._filled
+
+    @on(Input.Changed, "#name")
+    def _name_changed(self, event: Input.Changed) -> None:
+        self._fill_note(event.value)
+
+    @on(Input.Submitted, "#name")
+    def _name_submitted(self) -> None:
+        self.query_one("#note", Input).focus()
+
+    @on(Input.Submitted, "#note")
+    def _note_submitted(self) -> None:
+        name = self.query_one("#name", Input).value.strip()
+        if not name:
+            self.query_one("#name", Input).focus()
+            return
+        self.dismiss((self._known(name) or name, self.query_one("#note", Input).value))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 @dataclass
 class View:
     """One level of the navigation stack."""
 
-    kind: str  # menu | sets | set | tags | tag | search | recent | passed | failed | problem
-    arg: str | None = None  # set name, tag slug or problem slug
+    kind: str  # menu | sets | set | tags | tag | search | recent | passed | failed | lists | list | problem
+    arg: str | None = None  # set name, tag slug, list name or problem slug
     label: str = ""
     cursor: int = 0
     filter: str = ""
@@ -482,6 +574,8 @@ class MainApp(App):
         Binding("x", "submit", "Submit"),
         Binding("e", "open_editor", "Edit"),
         Binding("o", "open_browser", "Browser", show=False),
+        Binding("a", "save_to_list", "Save"),
+        Binding("D", "remove_from_list", "Remove", show=False),
         Binding("ctrl+d,pagedown", "scroll('page_down')", "Page down", show=False),
         Binding("ctrl+u,pageup", "scroll('page_up')", "Page up", show=False),
         Binding("g,home", "scroll('home')", "Top", show=False),
@@ -509,6 +603,8 @@ class MainApp(App):
         self.current: dict | None = None  # {"q": detail, "path": file}
         self.busy: str | None = None
         self.recent = load_recent()
+        self.saved = self._read_saved()
+        self.last_list: str | None = None
         self._filter_timer = None
         self._quit_forced = False
 
@@ -550,6 +646,7 @@ class MainApp(App):
 
     def _recent_pulled(self) -> None:
         self.recent = load_recent()
+        self._saved_changed()
         if self.view.kind == "recent":
             self.render_view()
 
@@ -625,6 +722,19 @@ class MainApp(App):
                     }
                 )
             return rows
+        if view.kind == "list":
+            rows = []
+            for e in lists.live_lists(self.saved).get(view.arg, []):
+                q = by_slug.get(e["slug"])
+                row = question_row(q) if q else {
+                    "id": e.get("id") or "?", "slug": e["slug"],
+                    "title": e.get("title") or e["slug"].replace("-", " ").title(),
+                    "diff": "?", "status": None, "paid": False, "ac_rate": None,
+                    "freq": None, "tags": [],
+                }
+                row["note"] = e.get("note", "")
+                rows.append(row)
+            return rows
         rows = [question_row(q) for q in self.questions]
         if view.kind == "tag":
             rows = [r for r in rows if view.arg in r["tags"]]
@@ -657,7 +767,7 @@ class MainApp(App):
         if self.diff_filter and row["diff"] != self.diff_filter:
             return False
         if text:
-            hay = f"{row['id']} {row['title']} {row['slug'] or ''}".lower()
+            hay = f"{row['id']} {row['title']} {row['slug'] or ''} {row.get('note', '')}".lower()
             return text in hay
         return True
 
@@ -722,6 +832,20 @@ class MainApp(App):
                 lvl = Text(label if self.index else "-", style=color if self.index else "dim")
                 table.add_row(name, f"{prog['solved']}/{prog['total']}", progress, lvl, key=name)
                 view.rows.append({"set": name, "label": name})
+        elif view.kind == "lists":
+            table.add_column("List", width=max(12, width - 18 - 6))
+            table.add_column("Solved", width=8)
+            table.add_column("Total", width=8)
+            view.rows = []
+            for name, items in lists.live_lists(self.saved).items():
+                if text and text not in name.lower():
+                    continue
+                by_slug = self.index[0] if self.index else {}
+                solved = sum(1 for e in items if by_slug.get(e["slug"], {}).get("status") == "ac")
+                table.add_row(name, str(solved) if self.index else "-", str(len(items)), key=name)
+                view.rows.append({"list": name, "label": name})
+            if not view.rows and not text:
+                table.add_row(Text("No lists yet: press a on a problem to save it.", style="dim"), "", "")
         elif view.kind == "tags":
             table.add_column("Tag", width=max(12, width - 18 - 6))
             table.add_column("Solved", width=8)
@@ -751,6 +875,8 @@ class MainApp(App):
                 title = Text(r["title"])
                 if r["paid"]:
                     title.append(" 🔒", style="yellow")
+                if r.get("note"):
+                    title.append(f"  {r['note']}", style="dim")
                 diff = Text(DIFF_NAME.get(r["diff"], r["diff"]), style=DIFF_COLOR.get(r["diff"], ""))
                 freq = r.get("freq")
                 freq_cell = Text(f"{freq:3.0f}" if freq else "", style="dim", justify="right")
@@ -822,6 +948,8 @@ class MainApp(App):
             return kind in PROBLEM_LISTS
         if action == "filter":
             return not in_menu and not in_problem
+        if action == "remove_from_list":
+            return kind == "list"
         return True
 
     # -- filter input --------------------------------------------------------------------------
@@ -884,6 +1012,8 @@ class MainApp(App):
             self.push(View("set", row["set"], label=row["set"]))
         elif view.kind == "tags":
             self.push(View("tag", row["tag"], label=row["name"]))
+        elif view.kind == "lists":
+            self.push(View("list", row["list"], label=row["list"]))
         else:
             self.open_row(row)
 
@@ -926,7 +1056,7 @@ class MainApp(App):
         cached = self.details.get(row["slug"])
         problem = self.query_one("#problem", ProblemView)
         if cached:
-            problem.show(cached)
+            problem.show(cached, self._notes_for(row["slug"]))
         else:
             problem.loading(label)
         self.open_problem(row["slug"])
@@ -971,7 +1101,7 @@ class MainApp(App):
             short = path.replace(str(Path.home()), "~")
             self.log_line(f"[green]{'Created' if created else 'Opened'}[/green] {short}")
         if self.view.kind == "problem" and self.view.arg == slug:
-            self.query_one("#problem", ProblemView).show(q)
+            self.query_one("#problem", ProblemView).show(q, self._notes_for(slug))
 
     # -- picks ------------------------------------------------------------------------------------
 
@@ -1050,12 +1180,92 @@ class MainApp(App):
     def action_help(self) -> None:
         self.log_line(
             "[bold]Keys[/bold]  j/k move (or scroll the problem) · l/Enter open · h back\n"
-            "      menu: c curated · t topics · s search · r recent · p passed · f failed\n"
+            "      menu: c curated · t topics · s search · r recent · p passed · f failed · m my lists\n"
             "      lists: / filter · u unsolved only · d cycle difficulty · f sort by frequency · r random · n next\n"
             "      problem: l jump to editor · ^d/^u page · g/G top/bottom\n"
             "      t test · x submit · e editor · o browser · ^r refresh · ^l clear log\n"
-            "      q save, sync the recent list (Drive or git), quit"
+            "      a save the problem to a list with a note · D remove it from the open list\n"
+            "      q save, sync the recent list and lists (Drive or git), quit"
         )
+
+    # -- lists -------------------------------------------------------------------------------------
+
+    def _lists_path(self) -> Path:
+        return core.data_dir() / lists.LISTS
+
+    def _read_saved(self) -> dict:
+        return lists.read_lists(self._lists_path())
+
+    def _notes_for(self, slug: str | None) -> list[tuple[str, str]]:
+        return lists.lists_for(self.saved, slug) if slug else []
+
+    def _saved_changed(self) -> None:
+        self.saved = self._read_saved()
+        if self.view.kind in ("lists", "list"):
+            self.render_view()
+        elif self.view.kind == "problem":
+            self.query_one("#problem", ProblemView).set_notes(self._notes_for(self.view.arg))
+
+    def _save_target(self) -> dict | None:
+        """{"slug", "id", "title"}: the problem on screen, the highlighted row, or the open one."""
+        if self.view.kind == "problem":
+            slug = self.view.arg
+            q = self.details.get(slug)
+            if q:
+                return {"slug": slug, "id": q.get("questionFrontendId") or "", "title": q.get("title") or ""}
+            return {"slug": slug, "id": "", "title": ""}
+        if self.view.kind in PROBLEM_LISTS:
+            row = self.selected_row()
+            if row and row.get("slug"):
+                pid = row["id"] if row["id"] != "?" else ""
+                return {"slug": row["slug"], "id": pid, "title": row["title"]}
+        if self.current:
+            q = self.current["q"]
+            return {"slug": q["titleSlug"], "id": q.get("questionFrontendId") or "", "title": q.get("title") or ""}
+        return None
+
+    def action_save_to_list(self) -> None:
+        target = self._save_target()
+        if not target:
+            self.log_line("[yellow]Open or highlight a problem first.[/yellow]")
+            return
+        self.saved = self._read_saved()
+        live = lists.live_lists(self.saved)
+        notes = dict(lists.lists_for(self.saved, target["slug"]))
+        default = self.view.arg if self.view.kind == "list" else (self.last_list or "")
+        label = f"{target['id']}. {target['title']}" if target["id"] else target["slug"]
+
+        def done(result: tuple[str, str] | None) -> None:
+            if not result:
+                return
+            name, note = result
+            try:
+                added = lists.save(
+                    self._lists_path(), name, target["slug"], note, target["id"], target["title"]
+                )
+            except (OSError, ValueError) as e:
+                self.log_line(f"[red]Could not save: {e}[/red]")
+                return
+            self.last_list = name
+            verb = "Saved" if added else "Updated note for"
+            self.log_line(f"[green]{verb}[/green] {label} [dim]in[/dim] [bold]{name}[/bold]")
+            self._saved_changed()
+
+        self.push_screen(SaveScreen(label, list(live), notes, default), done)
+
+    def action_remove_from_list(self) -> None:
+        row = self.selected_row()
+        name = self.view.arg
+        if not row or not row.get("slug") or not name:
+            return
+        try:
+            removed = lists.remove(self._lists_path(), name, row["slug"])
+        except OSError as e:
+            self.log_line(f"[red]Could not remove: {e}[/red]")
+            return
+        if removed:
+            self.log_line(f"[dim]Removed {row['slug']} from {name}.[/dim]")
+        self._saved_changed()
 
     # -- test / submit ----------------------------------------------------------------------------
 
@@ -1112,7 +1322,7 @@ class MainApp(App):
                 if self.index and slug in self.index[0]:
                     self.index[0][slug]["status"] = status
             if self.view.kind == "problem":
-                self.query_one("#problem", ProblemView).show(q)
+                self.query_one("#problem", ProblemView).show(q, self._notes_for(self.view.arg))
             else:
                 self.render_view()
         self.update_status()

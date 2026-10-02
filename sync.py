@@ -1,13 +1,13 @@
-"""Keep the tool's state (``recent.json``) in sync across machines.
+"""Keep the tool's state (``recent.json``, ``lists.json``) in sync across machines.
 
 Two backends:
 
 * **drive** -- a Google Drive folder via rclone.  Configure ``drive_folder_id``
   (the ID from the folder's share link) and ``rclone_remote`` (an rclone remote
   of type ``drive`` that can write to that folder).  On startup the remote
-  ``recent.json`` is merged into the local one; on quit the merged list is
-  uploaded.  Only the recent list is synced: solved status comes from LeetCode
-  and the problem index is regenerated locally.
+  ``recent.json`` and ``lists.json`` are merged into the local ones; on quit
+  the merged files are uploaded.  Only these two are synced: solved status
+  comes from LeetCode and the problem index is regenerated locally.
 * **git** -- if the data directory is a git repository, commit and push it on
   quit (fallback when no Drive folder is configured).
 
@@ -30,8 +30,10 @@ from pathlib import Path
 from rich.console import Console
 
 import config
+import lists
 
 RECENT = "recent.json"
+SYNCED = (RECENT, lists.LISTS)
 RECENT_LIMIT = 200
 
 
@@ -129,25 +131,34 @@ def _drive_ready(out: Console) -> str | None:
 # directories with an include filter.
 
 
+def _includes() -> list[str]:
+    return [arg for name in SYNCED for arg in ("--include", name)]
+
+
 def drive_pull(data_dir: Path, out: Console) -> bool:
-    """Merge the remote recent list into the local file."""
+    """Merge the remote recent list and lists into the local files."""
     target = _drive_ready(out)
     if not target:
         return False
     with tempfile.TemporaryDirectory(prefix="lc-sync-") as tmp:
-        r = _rclone("copy", target, tmp, "--include", RECENT)
+        r = _rclone("copy", target, tmp, *_includes())
         if r.returncode != 0:
             out.print(f"[red]Drive pull failed:[/red] {r.stdout.strip()}")
             return False
-        remote_copy = Path(tmp) / RECENT
-        if not remote_copy.exists():
-            out.print("[dim]No recent list on Drive yet.[/dim]")
+        remote_recent = Path(tmp) / RECENT
+        remote_lists = Path(tmp) / lists.LISTS
+        if not remote_recent.exists() and not remote_lists.exists():
+            out.print("[dim]Nothing on Drive yet.[/dim]")
             return True
-        remote = read_recent(remote_copy)
+        recent = read_recent(remote_recent)
+        saved = lists.read_lists(remote_lists)
     local_path = data_dir / RECENT
-    merged = merge_recent(read_recent(local_path), remote)
-    write_recent(local_path, merged)
-    out.print(f"[dim]Drive: merged {len(remote)} remote entries.[/dim]")
+    write_recent(local_path, merge_recent(read_recent(local_path), recent))
+    if saved:
+        lists_path = data_dir / lists.LISTS
+        lists.write_lists(lists_path, lists.merge_lists(lists.read_lists(lists_path), saved))
+    n = sum(1 for items in saved.values() for e in items.values() if not e.get("removed"))
+    out.print(f"[dim]Drive: merged {len(recent)} recent, {n} saved problems.[/dim]")
     return True
 
 
@@ -155,17 +166,17 @@ def drive_push(data_dir: Path, out: Console) -> bool:
     target = _drive_ready(out)
     if not target:
         return False
-    if not (data_dir / RECENT).exists():
+    if not any((data_dir / name).exists() for name in SYNCED):
         out.print("[dim]Nothing to upload.[/dim]")
         return True
     # Merge once more so a list changed elsewhere meanwhile is not clobbered.
     if not drive_pull(data_dir, out):
         return False
-    r = _rclone("copy", str(data_dir), target, "--include", RECENT)
+    r = _rclone("copy", str(data_dir), target, *_includes())
     if r.returncode != 0:
         out.print(f"[red]Drive push failed:[/red] {r.stdout.strip()}")
         return False
-    out.print("[green]Uploaded recent list to Drive.[/green]")
+    out.print("[green]Uploaded recent list and lists to Drive.[/green]")
     return True
 
 
