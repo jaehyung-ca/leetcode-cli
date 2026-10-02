@@ -189,14 +189,14 @@ def launch_tui() -> None:
     in_tmux = bool(os.environ.get("TMUX"))
     if in_tmux:
         window = _tmux(
-            "new-window", "-P", "-F", "#{window_id}", "-n", "leetcode", "-c", cwd,
+            "new-window", "-P", "-F", "#{window_id}", "-n", "lc", "-c", cwd,
             *env_args, editor_cmd,
         )
     else:
         size = shutil.get_terminal_size()
         tmux_session = f"leetcode-{os.getpid()}"
         _tmux(
-            "new-session", "-d", "-s", tmux_session, "-n", "leetcode", "-c", cwd,
+            "new-session", "-d", "-s", tmux_session, "-n", "lc", "-c", cwd,
             "-x", str(size.columns), "-y", str(size.lines), *env_args, editor_cmd,
         )
         window = _tmux("display-message", "-p", "-t", tmux_session, "#{window_id}")
