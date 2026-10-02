@@ -101,6 +101,8 @@ Only the recent list needs to follow you across machines (solved/failed status c
 - **Google Drive** (via [rclone](https://rclone.org)): set `drive_folder_id` to the ID from the folder's share link and `rclone_remote` to an rclone remote of type `drive` that can write to that folder (`rclone config` to create one). On startup the remote list is merged into the local one (union by problem, latest timestamp wins); on `q` the merged list is uploaded.
 - **git**: if no Drive folder is configured and the data directory is a git repository (`index.json` is git-ignored automatically), `q` commits its changes (`lc sync <date> (<n> files)`) and pushes when a remote is configured.
 
+On the first `lc` launch with no sync configured (and rclone with a `drive` remote available), the tool asks whether to set up Drive sync: pick the remote, then paste the folder's share link or ID, or press Enter to use (or create) a `leetcode-cli` folder at the remote's root. The settings are written to `config.json`; answering no stores `"data_sync": "none"`. Run `lc sync-setup` to configure it again.
+
 `data_sync` in the config forces a mode (`"drive"`, `"git"` or `"none"`). If a sync fails the error is shown in the log and `q` again quits anyway.
 
 ### Authentication

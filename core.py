@@ -416,11 +416,14 @@ def run_test(file_path: str, out: Console, q: dict | None = None) -> dict | None
             if runtime:
                 out.print(f"Runtime: {runtime}")
 
+            runtime_error = check.get("runtime_error")
             if check.get("compile_error"):
                 out.print(f"[red]{check.get('compile_error')}[/red]")
-            elif check.get("runtime_error"):
-                out.print(f"[red]{check.get('runtime_error')}[/red]")
             else:
+                # A runtime error still reports the stdout of every case that ran
+                # (including the crashing one), so fall through to the cases.
+                if runtime_error:
+                    out.print(check.get("full_runtime_error") or runtime_error, style="red", markup=False)
                 expected = check.get("expected_code_answer", [])
                 actual = check.get("code_answer", [])
                 stdout = check.get("std_output_list", check.get("code_output", []))
@@ -438,6 +441,13 @@ def run_test(file_path: str, out: Console, q: dict | None = None) -> dict | None
                     len(actual) if isinstance(actual, list) else 0,
                 )
                 args_per_case = len(raw_tc_lines) // num_cases if num_cases > 0 else 1
+                if runtime_error:
+                    # Only the cases that ran: those with an answer, plus the one that crashed.
+                    ran = max(
+                        len(actual) if isinstance(actual, list) else 0,
+                        len(stdout) if isinstance(stdout, list) else 0,
+                    )
+                    num_cases = min(num_cases, ran) if num_cases else ran
 
                 for i in range(num_cases):
                     out.print(f"\n[bold]Test Case {i + 1}:[/bold]")
@@ -447,12 +457,16 @@ def run_test(file_path: str, out: Console, q: dict | None = None) -> dict | None
                         out.print(f"  Input:    [magenta]{', '.join(inputs)}[/magenta]")
 
                     exp = expected[i] if isinstance(expected, list) and i < len(expected) else "N/A"
-                    act = actual[i] if isinstance(actual, list) and i < len(actual) else "N/A"
+                    has_act = isinstance(actual, list) and i < len(actual)
+                    act = actual[i] if has_act else "N/A"
 
-                    ok = compare_answers(exp, act, status)
                     out.print(f"  Expected: {exp}")
                     out.print("  Output:   ", end="")
-                    out.print(act, style="green" if ok else "red")
+                    if not has_act and runtime_error:
+                        out.print("Runtime Error", style="bold red")
+                    else:
+                        ok = compare_answers(exp, act, status)
+                        out.print(act, style="green" if ok else "red")
 
                     if isinstance(stdout, list) and i < len(stdout) and stdout[i]:
                         out.print("  Stdout:")

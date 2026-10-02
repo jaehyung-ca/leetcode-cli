@@ -715,6 +715,14 @@ def tui_cmd():
     launch_tui()
 
 
+@app.command("sync-setup")
+def sync_setup():
+    """Configure syncing the recent list through Google Drive (rclone)."""
+    import sync
+
+    sync.setup_drive(core.data_dir(), console)
+
+
 @app.command("_pane", hidden=True)
 def pane_cmd(
     role: str = typer.Argument(..., help="main"),

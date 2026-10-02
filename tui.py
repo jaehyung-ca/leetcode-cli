@@ -100,7 +100,8 @@ class Session:
 
 def _tmux(*args: str, check: bool = True) -> str:
     result = subprocess.run(
-        ["tmux", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        ["tmux", *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
     )
     if check and result.returncode != 0:
         raise RuntimeError(f"tmux {' '.join(args)}: {result.stderr.strip()}")
@@ -110,7 +111,8 @@ def _tmux(*args: str, check: bool = True) -> str:
 def _tmux_ok(*args: str) -> bool:
     return (
         subprocess.run(
-            ["tmux", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ["tmux", *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         ).returncode
         == 0
     )
@@ -163,6 +165,11 @@ def launch_tui() -> None:
     """Entry point for ``lc`` / ``lc tui``."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise SystemExit("lc tui needs an interactive terminal.")
+    if sync.needs_setup(core.data_dir()):
+        try:
+            sync.setup_drive(core.data_dir(), Console(), auto=True)
+        except (KeyboardInterrupt, EOFError):
+            print()
     if not shutil.which("tmux") or config.get_config("tui_tmux", True) is False:
         MainApp(Session()).run()
         return
@@ -228,10 +235,12 @@ class EditorBridge:
         self.argv, self.kind = _editor()
 
     def _nvim_send(self, keys: str) -> bool:
+        # stdin must not be our tty: the nvim client sets O_NONBLOCK on it while
+        # it runs, and Textual's input thread then dies with BlockingIOError.
         return (
             subprocess.run(
                 ["nvim", "--server", str(self.session.nvim_socket), "--remote-send", keys],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             ).returncode
             == 0
         )
