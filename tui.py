@@ -466,7 +466,8 @@ class MainApp(App):
     BINDINGS = [
         Binding("j,down", "down", "Down", show=False),
         Binding("k,up", "up", "Up", show=False),
-        Binding("h,escape,backspace", "back", "Back"),
+        Binding("h,backspace", "back", "Back"),
+        Binding("escape", "leave_filter", "Leave filter", show=False),
         Binding("l,enter", "forward", "Open"),
         Binding("l", "focus_editor", "Editor", show=False),
         # Menu sections (first letter).
@@ -856,11 +857,15 @@ class MainApp(App):
         self.query_one("#problem", ProblemView).scroll(how)
 
     def action_back(self) -> None:
-        filt = self.query_one("#filter", Input)
-        if filt.has_focus:
-            self.query_one("#table", DataTable).focus()
+        if self.action_leave_filter():
             return
         self.pop()
+
+    def action_leave_filter(self) -> bool:
+        if self.query_one("#filter", Input).has_focus:
+            self.query_one("#table", DataTable).focus()
+            return True
+        return False
 
     @on(DataTable.RowSelected)
     def _on_row_selected(self) -> None:

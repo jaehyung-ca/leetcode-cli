@@ -76,7 +76,8 @@ Navigation is vi-style: `j`/`k` move, `l` (or `Enter`) opens, `h` goes back. Pro
 |-----|--------|
 | `j` / `k` | Move in a list, or scroll the problem description |
 | `l` / `Enter` | Open the highlighted section, set, tag or problem; on a problem, jump to the editor |
-| `h` / `Esc` / `Backspace` | Back (or leave the filter box) |
+| `h` / `Backspace` | Back |
+| `Esc` | Leave the filter box |
 | `/` | Filter the current list (ID, title, slug, set or tag name) |
 | `u` / `d` / `f` | Toggle unsolved-only / cycle difficulty (all → easy → medium → hard) / sort by interview frequency |
 | `r` / `n` | Open a random / the first unsolved problem in the current list (or the highlighted set) |
