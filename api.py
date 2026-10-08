@@ -1,26 +1,34 @@
 from curl_cffi import requests
 from config import get_config
-from auth import get_auth_cookies, get_auth_headers
+from auth import get_auth_cookies, get_auth_headers, refresh_cookies
 
 GRAPHQL_URL = "https://leetcode.com/graphql"
 BASE_URL = "https://leetcode.com"
 
+
+def _send(method, url, extra_headers=None, **kwargs):
+    """Send an authenticated request; if rejected, re-read the browser cookies and retry once."""
+    for attempt in range(2):
+        headers = get_auth_headers()
+        headers.update(extra_headers or {})
+        cookies = get_auth_cookies()
+        response = requests.request(
+            method, url, headers=headers, cookies=cookies, impersonate="chrome", **kwargs
+        )
+        # LeetCode serves its "403 Forbidden" page for bad cookies with status 499
+        if (
+            response.status_code not in (401, 403, 499)
+            or attempt
+            or not refresh_cookies(rejected=cookies.get("LEETCODE_SESSION"))
+        ):
+            return response
+
 def _graphql_request(query, variables=None):
-    headers = get_auth_headers()
-    cookies = get_auth_cookies()
-    
     payload = {
         "query": query,
         "variables": variables or {}
     }
-    
-    response = requests.post(
-        GRAPHQL_URL, 
-        json=payload, 
-        headers=headers, 
-        cookies=cookies,
-        impersonate="chrome"
-    )
+    response = _send("POST", GRAPHQL_URL, json=payload)
     response.raise_for_status()
     return response.json()
 
@@ -185,11 +193,6 @@ def get_tags():
 
 def test_code(title_slug: str, question_id: str, lang: str, typed_code: str, data_input: str):
     url = f"{BASE_URL}/problems/{title_slug}/interpret_solution/"
-    headers = get_auth_headers()
-    headers["Referer"] = f"https://leetcode.com/problems/{title_slug}/"
-    headers["Origin"] = "https://leetcode.com"
-    cookies = get_auth_cookies()
-    
     payload = {
         "lang": lang,
         "question_id": question_id,
@@ -197,43 +200,38 @@ def test_code(title_slug: str, question_id: str, lang: str, typed_code: str, dat
         "data_input": data_input
     }
     
-    response = requests.post(url, json=payload, headers=headers, cookies=cookies, impersonate="chrome")
+    response = _send("POST", url, extra_headers={
+        "Referer": f"https://leetcode.com/problems/{title_slug}/",
+        "Origin": "https://leetcode.com",
+    }, json=payload)
     if response.status_code != 200:
         raise Exception(f"HTTP {response.status_code}: {response.text[:500]}")
     return response.json()
 
 def submit_code(title_slug: str, question_id: str, lang: str, typed_code: str):
     url = f"{BASE_URL}/problems/{title_slug}/submit/"
-    headers = get_auth_headers()
-    headers["Referer"] = f"https://leetcode.com/problems/{title_slug}/"
-    headers["Origin"] = "https://leetcode.com"
-    cookies = get_auth_cookies()
-    
     payload = {
         "lang": lang,
         "question_id": question_id,
         "typed_code": typed_code
     }
     
-    response = requests.post(url, json=payload, headers=headers, cookies=cookies, impersonate="chrome")
+    response = _send("POST", url, extra_headers={
+        "Referer": f"https://leetcode.com/problems/{title_slug}/",
+        "Origin": "https://leetcode.com",
+    }, json=payload)
     if response.status_code != 200:
         raise Exception(f"HTTP {response.status_code}: {response.text[:500]}")
     return response.json()
 
 def check_submission(submission_id):
     url = f"{BASE_URL}/submissions/detail/{submission_id}/check/"
-    headers = get_auth_headers()
-    cookies = get_auth_cookies()
-    
-    response = requests.get(url, headers=headers, cookies=cookies, impersonate="chrome")
+    response = _send("GET", url)
     response.raise_for_status()
     return response.json()
 
 def check_test_run(interpret_id):
     url = f"{BASE_URL}/submissions/detail/{interpret_id}/check/"
-    headers = get_auth_headers()
-    cookies = get_auth_cookies()
-    
-    response = requests.get(url, headers=headers, cookies=cookies, impersonate="chrome")
+    response = _send("GET", url)
     response.raise_for_status()
     return response.json()

@@ -5,7 +5,7 @@ A feature-rich command-line interface for LeetCode. Browse, edit, test, and subm
 ## Features
 
 - **TUI**: `lc` with no arguments opens a two-pane tmux workspace: a vi-style browser (curated sets, topics, search, recent, passed, failed) with the problem description on the left, your editor (nvim) on the right; the recently-opened list syncs across machines via Google Drive or git (`lc tui`).
-- **Authentication**: Automatically extracts LeetCode session cookies from your local browser (`lc auth`).
+- **Authentication**: Automatic: every run picks up your LeetCode session cookies from Brave or Firefox, and re-reads them if LeetCode rejects the stored ones. When the login has expired, `lc` opens the LeetCode login page in your browser and carries on once you have logged in (`lc auth` still forces a refresh).
 - **Problem Browsing**: List problems with filters for tags, difficulty, and search keywords (`lc list`, `lc tags`).
 - **Problem Details**: View problem descriptions directly in the terminal, rendered in markdown (`lc pick`).
 - **Your Lists**: Save the problem you are working on to your own lists, each with a note, from the TUI (`a`) or the CLI (`lc save`, `lc lists`); lists sync across machines with the recent list.
@@ -114,7 +114,7 @@ On the first `lc` launch with no sync configured (and rclone with a `drive` remo
 `data_sync` in the config forces a mode (`"drive"`, `"git"` or `"none"`). If a sync fails the error is shown in the log and `q` again quits anyway.
 
 ### Authentication
-Start by extracting your browser cookies to authenticate with LeetCode. Ensure you are logged into LeetCode on Chrome/Firefox/Edge/Safari.
+Nothing to set up: log in to leetcode.com in Brave or Firefox and `lc` reads the session cookies from there on each run. If LeetCode rejects them, `lc` looks in the browser again; if the login has expired, it opens the login page in your browser, waits (up to 5 minutes) for you to log in, and continues. To pull the cookies by hand:
 ```bash
 lc auth
 # Alias: lc a

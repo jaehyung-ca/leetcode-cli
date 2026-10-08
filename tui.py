@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,7 @@ from textual.suggester import SuggestFromList
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
 import api
+import auth
 import config
 import core
 import lists
@@ -621,6 +623,7 @@ class MainApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        auth.notify = self._log_from_any_thread
         cached = load_index_cache()
         if cached:
             self._set_index(cached, state="loading")
@@ -658,6 +661,12 @@ class MainApp(App):
     def log_line(self, markup: str) -> None:
         self.query_one("#log", RichLog).write(Text.from_markup(markup))
 
+    def _log_from_any_thread(self, markup: str) -> None:
+        if threading.get_ident() == self._thread_id:
+            self.log_line(markup)
+        else:
+            self.call_from_thread(self.log_line, markup)
+
     def log_ansi(self, line: str) -> None:
         self.query_one("#log", RichLog).write(Text.from_ansi(line))
 
@@ -677,7 +686,7 @@ class MainApp(App):
     def _index_failed(self, err: str) -> None:
         self.index_state = "offline"
         self.log_line(f"[yellow]Could not fetch problems from LeetCode: {err}[/yellow]")
-        self.log_line("[yellow]Showing cached/offline data. Run `lc auth` if cookies expired.[/yellow]")
+        self.log_line("[yellow]Showing cached/offline data. Log in to leetcode.com in Brave or Firefox, then restart.[/yellow]")
         self.update_crumb()
 
     def _set_index(self, questions: list[dict], state: str) -> None:
