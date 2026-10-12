@@ -319,6 +319,9 @@ def run_submit(file_path: str, out: Console, q: dict | None = None) -> dict | No
             status = check.get("status_msg")
             color = "green" if status == "Accepted" else "red"
             out.print(f"\n[bold {color}]Result: {status}[/bold {color}]")
+            passed, total = check.get("total_correct"), check.get("total_testcases")
+            if total is not None:
+                out.print(f"Testcases: [{color}]{passed or 0}[/{color}] / {total} passed")
             if status == "Accepted":
                 rt_perc = check.get("runtime_percentile")
                 mem_perc = check.get("memory_percentile")
