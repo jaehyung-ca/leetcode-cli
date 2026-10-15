@@ -201,7 +201,7 @@ def launch_tui() -> None:
         )
     else:
         size = shutil.get_terminal_size()
-        tmux_session = f"leetcode-{os.getpid()}"
+        tmux_session = f"lc-{os.getpid()}"
         _tmux(
             "new-session", "-d", "-s", tmux_session, "-n", "lc", "-c", cwd,
             "-x", str(size.columns), "-y", str(size.lines), *env_args, editor_cmd,
